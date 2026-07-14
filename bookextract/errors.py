@@ -70,9 +70,9 @@ RUN_STATE_CODES = frozenset(
         "token-counting-contract-drift",
         "invalid-commit-artifact-path",
         "unsupported-pandoc-defaults",
+        "output-transaction-corruption",
     }
 )
-
 EXIT_SUCCESS = 0
 EXIT_UNEXPECTED = 1
 EXIT_ARGPARSE = 2

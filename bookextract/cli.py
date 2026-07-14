@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import sys
 import tomllib
 from collections.abc import Callable
@@ -14,11 +15,6 @@ from pathlib import Path
 import fitz
 from pydantic import ValidationError
 
-from bookextract.canonical import (
-    normalize_publication_document_nfc,
-    publication_fingerprint_hex,
-    publication_identifier,
-)
 from bookextract.config import (
     InferenceLocation,
     ProcessingConfig,
@@ -33,12 +29,26 @@ from bookextract.config import (
 from bookextract.errors import BookExtractError, ProcessingError, exit_code_for_error
 from bookextract.fingerprints import fingerprint_file
 from bookextract.interpretation.prompts import prompt_sha256
-from bookextract.models import BookDocument, OutputManifest, PageAssessment
+from bookextract.output_publish import (
+    publish_output,
+    quarantine_invalid_output_destinations,
+    recover_output_transaction,
+)
 from bookextract.pdf import PdfPageSource
 from bookextract.pipeline import process_book
 from bookextract.rendering.epub import EpubRenderer
 from bookextract.rendering.markdown import MarkdownRenderer
+from bookextract.rendering.output_bundle import (
+    build_output_manifest,
+    collect_commit_assets,
+    write_output_bundle,
+)
 from bookextract.rendering.publication import build_publication_document
+from bookextract.run_guard import (
+    assert_process_consistency,
+    assert_render_consistency,
+    load_document_from_commits,
+)
 from bookextract.run_lock import acquire_run_lock
 from bookextract.storage import RunStore
 
@@ -138,6 +148,7 @@ def _compute_relocation(
     existing = store.load_inference_environment()
     if existing is None:
         return InferenceLocation(
+            inference_location_format_version=1,
             model_file_path=resulting_model,
             projector_file_path=resulting_projector,
         )
@@ -186,6 +197,7 @@ def _compute_relocation(
         )
 
     return InferenceLocation(
+        inference_location_format_version=1,
         model_file_path=resulting_model,
         projector_file_path=resulting_projector,
     )
@@ -231,20 +243,29 @@ def cmd_init(args: argparse.Namespace) -> int:
         store.ensure_layout()
 
         run_record = RunRecord(
+            run_format_version=1,
             source={"sha256": sha256, "size_bytes": size_bytes, "page_count": page_count},
             extraction=config.extraction,
             fingerprint_policy=config.fingerprint,
             process_options=config.process,
-            render_contract=RenderContract(pymupdf_version=fitz.__version__),
+            markdown=config.markdown,
+            epub=config.epub,
+            render_contract=RenderContract(
+                render_contract_format_version=1,
+                pymupdf_version=fitz.__version__,
+            ),
             prompt_sha256=prompt_sha256(),
             wire_schema_sha256=_wire_schema_sha256(),
             created_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         )
         write_json_atomic(run_dir / "run.json", run_record.model_dump(mode="json"))
 
-        store.write_source_location(SourceLocation(pdf_path=pdf_path))
+        store.write_source_location(
+            SourceLocation(source_location_format_version=1, pdf_path=pdf_path)
+        )
         store.write_inference_location(
             InferenceLocation(
+                inference_location_format_version=1,
                 model_file_path=model_path,
                 projector_file_path=projector_path,
             )
@@ -252,15 +273,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         store.write_head(0)
     print(f"initialized run at {run_dir}")
     return 0
-
-
-def _load_document_from_commits(store: RunStore) -> BookDocument:
-    head = store.read_head()
-    document = BookDocument()
-    for page_number in range(1, head.committed_page_count + 1):
-        raw = store.read_commit_file(page_number, "page-assessment.json")
-        document.pages.append(PageAssessment.model_validate_json(raw.decode("utf-8")))
-    return document
 
 
 def _process_kwargs(args: argparse.Namespace) -> dict[str, int | None]:
@@ -278,9 +290,18 @@ def cmd_process(args: argparse.Namespace) -> int:
     try:
         with acquire_run_lock(run_arg):
             run_dir = run_arg.resolve()
-            config = processing_config_from_run_record(load_run_record(run_dir))
+            record = load_run_record(run_dir)
+            config = processing_config_from_run_record(record)
             store = RunStore(run_dir)
             store.recover()
+            recover_output_transaction(store, "markdown")
+            recover_output_transaction(store, "epub")
+            quarantine_invalid_output_destinations(store)
+            assert_process_consistency(
+                store,
+                record,
+                require_inference_location=args.interpreter == "vlm",
+            )
 
             source_loc = store.load_source_location()
             pdf_source = PdfPageSource(
@@ -422,70 +443,128 @@ def cmd_relocate_inference_files(args: argparse.Namespace) -> int:
 
 
 def cmd_render_markdown(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run).resolve()
-    store = RunStore(run_dir)
-    config = processing_config_from_run_record(load_run_record(run_dir))
-    document = _load_document_from_commits(store)
-
-    renderer = MarkdownRenderer(config.markdown)
-    markdown = renderer.render_book(document, epub_include_toc=config.epub.include_toc)
-
-    output_dir = run_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    markdown_path = output_dir / "book.md"
-    markdown_path.write_text(markdown, encoding="utf-8")
-
-    pub_doc, source_map = build_publication_document(
-        document,
-        markdown_config=config.markdown,
-        epub_config=config.epub,
-    )
-    normalized = normalize_publication_document_nfc(pub_doc)
-    manifest = OutputManifest(
-        publication_identifier=publication_identifier(normalized),
-        publication_fingerprint=publication_fingerprint_hex(normalized),
-        source_map=sorted(source_map, key=lambda e: e.publication_block_index),
-    )
-    write_json_atomic(
-        output_dir / "manifest.json",
-        manifest.model_dump(mode="json"),
-    )
-    print(f"wrote {markdown_path}")
-    return 0
-
-
-def cmd_render_epub(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run).resolve()
-    store = RunStore(run_dir)
-    config = processing_config_from_run_record(load_run_record(run_dir))
-    document = _load_document_from_commits(store)
-
-    renderer = MarkdownRenderer(config.markdown)
-    markdown = renderer.render_book(document, epub_include_toc=config.epub.include_toc)
-    pub_doc, _ = build_publication_document(
-        document,
-        markdown_config=config.markdown,
-        epub_config=config.epub,
-    )
-
-    output_dir = run_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    markdown_path = output_dir / "book.md"
-    markdown_path.write_text(markdown, encoding="utf-8")
-
-    epub_renderer = EpubRenderer(config.epub)
+    run_arg = Path(args.run)
     try:
-        epub_renderer.render_publication(
-            publication=pub_doc,
-            markdown=markdown,
-            output_path=output_dir / "book.epub",
-            build_directory=run_dir / ".output-build",
-        )
+        with acquire_run_lock(run_arg):
+            run_dir = run_arg.resolve()
+            record = load_run_record(run_dir)
+            config = processing_config_from_run_record(record)
+            store = RunStore(run_dir)
+            store.recover()
+            recover_output_transaction(store, "markdown")
+            assert_render_consistency(store, record, "markdown")
+            document = load_document_from_commits(store)
+            head = store.read_head().committed_page_count
+
+            pub_doc, source_map = build_publication_document(
+                document,
+                markdown_config=config.markdown,
+                epub_config=config.epub,
+            )
+            renderer = MarkdownRenderer(config.markdown)
+            markdown = renderer.render_publication(pub_doc).encode("utf-8")
+            assets = collect_commit_assets(store)
+            manifest = build_output_manifest(
+                command="markdown",
+                committed_page_count=head,
+                publication=pub_doc,
+                source_map=source_map,
+                files=[],
+            )
+
+            def builder(candidate_path: Path, _work_path: Path | None) -> None:
+                write_output_bundle(
+                    candidate_path,
+                    command="markdown",
+                    primary_name="book.md",
+                    primary_bytes=markdown,
+                    manifest=manifest,
+                    assets=assets,
+                )
+
+            destination = publish_output(store, "markdown", builder)
     except BookExtractError as exc:
         print(f"{exc.code}: {exc}", file=sys.stderr)
         return exit_code_for_error(exc)
 
-    print(f"wrote {output_dir / 'book.epub'}")
+    print(f"wrote {destination / 'book.md'}")
+    return 0
+
+
+def cmd_render_epub(args: argparse.Namespace) -> int:
+    run_arg = Path(args.run)
+    try:
+        with acquire_run_lock(run_arg):
+            run_dir = run_arg.resolve()
+            record = load_run_record(run_dir)
+            config = processing_config_from_run_record(record)
+            store = RunStore(run_dir)
+            store.recover()
+            recover_output_transaction(store, "epub")
+            assert_render_consistency(store, record, "epub")
+            document = load_document_from_commits(store)
+            head = store.read_head().committed_page_count
+
+            pub_doc, source_map = build_publication_document(
+                document,
+                markdown_config=config.markdown,
+                epub_config=config.epub,
+            )
+            renderer = MarkdownRenderer(config.markdown)
+            markdown = renderer.render_publication(pub_doc)
+            assets = collect_commit_assets(store)
+            manifest = build_output_manifest(
+                command="epub",
+                committed_page_count=head,
+                publication=pub_doc,
+                source_map=source_map,
+                files=[],
+            )
+            epub_renderer = EpubRenderer(config.epub)
+
+            def builder(candidate_path: Path, work_path: Path | None) -> None:
+                if work_path is None:
+                    raise ProcessingError(
+                        code="invalid-run-layout",
+                        message="epub render requires a work directory",
+                    )
+                markdown_path = work_path / "book.md"
+                markdown_path.write_text(markdown, encoding="utf-8")
+                assets_dir = work_path / "assets"
+                if assets_dir.exists():
+                    shutil.rmtree(assets_dir)
+                for rel_path, content in assets.items():
+                    dest = assets_dir / Path(rel_path)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(content)
+                epub_path = candidate_path / "book.epub"
+                epub_renderer.render(
+                    markdown_path=markdown_path,
+                    output_path=epub_path,
+                    metadata=pub_doc.metadata,
+                    build_directory=work_path,
+                )
+                epub_renderer.run_epubcheck(epub_path)
+                write_output_bundle(
+                    candidate_path,
+                    command="epub",
+                    primary_name="book.epub",
+                    primary_bytes=epub_path.read_bytes(),
+                    manifest=manifest,
+                    assets=assets,
+                )
+
+            destination = publish_output(
+                store,
+                "epub",
+                builder,
+                use_work_directory=True,
+            )
+    except BookExtractError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return exit_code_for_error(exc)
+
+    print(f"wrote {destination / 'book.epub'}")
     return 0
 
 

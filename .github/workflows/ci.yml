@@ -31,3 +31,9 @@ jobs:
 
       - name: Pytest
         run: uv run pytest
+
+      - name: Build wheel
+        run: uv build
+
+      - name: Wheel smoke
+        run: uv run python scripts/installed_wheel_smoke.py dist/bookextract-*.whl
