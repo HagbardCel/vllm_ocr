@@ -138,7 +138,7 @@ def run_dir(tmp_path: Path, minimal_pdf: Path) -> Path:
             epub=EpubRenderConfig(),
             render_contract=RenderContract(
                 render_contract_format_version=1,
-                pymupdf_version=fitz.VersionBind,
+                pymupdf_version=fitz.__version__,
             ),
             prompt_sha256="0" * 64,
             wire_schema_sha256="0" * 64,
@@ -151,4 +151,5 @@ def run_dir(tmp_path: Path, minimal_pdf: Path) -> Path:
             mode="json"
         ),
     )
+    store.write_head(0)
     return run

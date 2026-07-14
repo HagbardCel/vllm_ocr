@@ -183,9 +183,18 @@ class RunStore:
 
     def read_head(self) -> HeadState:
         head_path = self._path("head.json")
-        if not head_path.is_file():
-            return HeadState(head_format_version=1, committed_page_count=0)
-        return HeadState.model_validate_json(head_path.read_text(encoding="utf-8"))
+        if not head_path.is_file() or head_path.is_symlink():
+            raise ProcessingError(
+                code="invalid-run-layout",
+                message="missing or invalid head.json",
+            )
+        try:
+            return HeadState.model_validate_json(head_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ProcessingError(
+                code="invalid-run-layout",
+                message="invalid head.json",
+            ) from exc
 
     def write_head(self, committed_page_count: int) -> None:
         payload = HeadState(

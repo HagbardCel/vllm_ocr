@@ -7,12 +7,21 @@ import json
 from pathlib import Path
 from typing import Literal
 
+import fitz
+
 from bookextract.config import RunRecord
 from bookextract.errors import ProcessingError
 from bookextract.interpretation.prompts import prompt_sha256
 from bookextract.models import BookDocument, PageAssessment
 from bookextract.schema import load_wire_schema
-from bookextract.storage import RunStore, validate_commit
+from bookextract.storage import RunStore
+
+_PYMUPDF_OPEN_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    RuntimeError,
+    fitz.FileDataError,
+    fitz.EmptyFileError,
+)
 
 
 def _wire_schema_sha256() -> str:
@@ -22,12 +31,33 @@ def _wire_schema_sha256() -> str:
     ).hexdigest()
 
 
-def _hash_file(path: Path) -> str:
+def _hash_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
+    size = 0
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
+def _inspect_source_pdf(path: Path) -> tuple[str, int, int]:
+    try:
+        sha256, size_bytes = _hash_file(path)
+        with fitz.open(path) as document:
+            page_count = len(document)
+    except _PYMUPDF_OPEN_ERRORS as exc:
+        raise ProcessingError(
+            code="invalid-source-pdf",
+            message=f"cannot open source PDF: {path}",
+        ) from exc
+
+    if page_count < 1:
+        raise ProcessingError(
+            code="invalid-source-pdf",
+            message="source PDF contains no pages",
+        )
+    return sha256, size_bytes, page_count
 
 
 def load_document_from_commits(store: RunStore) -> BookDocument:
@@ -37,6 +67,28 @@ def load_document_from_commits(store: RunStore) -> BookDocument:
         raw = store.read_commit_file(page_number, "page-assessment.json")
         document.pages.append(PageAssessment.model_validate_json(raw.decode("utf-8")))
     return document
+
+
+def _validate_live_source(record: RunRecord, pdf_path: Path) -> None:
+    actual_sha, actual_size, actual_pages = _inspect_source_pdf(pdf_path)
+
+    expected_sha = record.source.get("sha256")
+    if not isinstance(expected_sha, str) or actual_sha != expected_sha:
+        raise ProcessingError(code="source-hash-mismatch", message="source PDF hash mismatch")
+
+    expected_size = record.source.get("size_bytes")
+    if not isinstance(expected_size, int) or actual_size != expected_size:
+        raise ProcessingError(
+            code="source-hash-mismatch",
+            message="source PDF size_bytes mismatch",
+        )
+
+    expected_pages = record.source.get("page_count")
+    if not isinstance(expected_pages, int) or actual_pages != expected_pages:
+        raise ProcessingError(
+            code="source-hash-mismatch",
+            message="source PDF page_count mismatch",
+        )
 
 
 def assert_process_consistency(
@@ -60,6 +112,12 @@ def assert_process_consistency(
     if record.wire_schema_sha256 != _wire_schema_sha256():
         raise ProcessingError(code="schema-drift", message="wire schema drift")
 
+    if record.render_contract.pymupdf_version != fitz.__version__:
+        raise ProcessingError(
+            code="render-environment-drift",
+            message="pymupdf version drift",
+        )
+
     source_loc = store.load_source_location()
     if source_loc.source_location_format_version != 1:
         raise ProcessingError(
@@ -71,10 +129,7 @@ def assert_process_consistency(
             code="invalid-source-pdf",
             message=f"source PDF not found: {source_loc.pdf_path}",
         )
-    actual_sha = _hash_file(source_loc.pdf_path)
-    expected_sha = record.source.get("sha256")
-    if not isinstance(expected_sha, str) or actual_sha != expected_sha:
-        raise ProcessingError(code="source-hash-mismatch", message="source PDF hash mismatch")
+    _validate_live_source(record, source_loc.pdf_path)
 
     if require_inference_location:
         location = store.load_inference_location()
@@ -85,26 +140,18 @@ def assert_process_consistency(
             )
 
 
-def _validate_pandoc_defaults() -> None:
-    from bookextract.rendering.epub import EpubRenderer
-
-    EpubRenderer()._load_base_defaults()
-
-
 def assert_render_consistency(
     store: RunStore,
     record: RunRecord,
     command: Literal["markdown", "epub"],
 ) -> None:
-    del command
     if record.run_format_version != 1:
         raise ProcessingError(
             code="invalid-run-layout",
             message=f"unsupported run_format_version: {record.run_format_version}",
         )
     store.load_source_location()
-    head = store.read_head()
-    for page_number in range(1, head.committed_page_count + 1):
-        validate_commit(store.commit_dir_for(page_number))
-    load_document_from_commits(store)
-    _validate_pandoc_defaults()
+    if command == "epub":
+        from bookextract.rendering.epub import EpubRenderer
+
+        EpubRenderer()._load_base_defaults()
