@@ -169,7 +169,10 @@ def _load_transaction_marker(store: RunStore, command: OutputCommand) -> OutputT
     if path.is_symlink():
         _quarantine_path_or_corrupt(store, path, f"{command}.transaction.json")
         return None
+    if not path.exists():
+        return None
     if not path.is_file():
+        _quarantine_path_or_corrupt(store, path, f"{command}.transaction.json")
         return None
     try:
         transaction = OutputTransaction.model_validate_json(path.read_text(encoding="utf-8"))
@@ -241,6 +244,46 @@ def _restore_previous(
     shutil.move(str(previous_path), str(destination))
 
 
+def _try_restore_valid_previous(
+    store: RunStore,
+    command: OutputCommand,
+    *,
+    previous_path: Path,
+    destination: Path,
+) -> bool:
+    if destination.exists() or destination.is_symlink():
+        raise ProcessingError(
+            code="output-transaction-corruption",
+            message=(
+                f"cannot restore {command} previous tree "
+                "while a destination still exists"
+            ),
+        )
+
+    if not previous_path.exists() and not previous_path.is_symlink():
+        return False
+
+    if not _validate_tree(
+        previous_path,
+        command=command,
+        expected_committed_page_count=None,
+    ):
+        _quarantine_path(
+            store,
+            previous_path,
+            f"{command}-previous-invalid",
+        )
+        return False
+
+    _restore_previous(
+        store,
+        command,
+        previous_path=previous_path,
+        destination=destination,
+    )
+    return True
+
+
 def _publish_candidate(
     store: RunStore,
     command: OutputCommand,
@@ -264,13 +307,12 @@ def _reject_invalid_candidate_restore_previous(
     work_path: Path | None,
 ) -> None:
     _quarantine_path(store, candidate_path, f"{command}-candidate-invalid")
-    if _validate_tree(previous_path, command=command, expected_committed_page_count=None):
-        _restore_previous(
-            store,
-            command,
-            previous_path=previous_path,
-            destination=destination,
-        )
+    _try_restore_valid_previous(
+        store,
+        command,
+        previous_path=previous_path,
+        destination=destination,
+    )
     _finish_recovery(
         store,
         command,
@@ -333,7 +375,12 @@ def _recover_candidate_published(
 
     if _validate_tree(previous_path, command=command, expected_committed_page_count=None):
         _quarantine_path(store, destination, f"{command}-destination-invalid")
-        _restore_previous(store, command, previous_path=previous_path, destination=destination)
+        _try_restore_valid_previous(
+            store,
+            command,
+            previous_path=previous_path,
+            destination=destination,
+        )
         _finish_recovery(
             store,
             command,
@@ -491,7 +538,7 @@ def _recover_with_marker(
             )
             return
         if not dest_exists and not cand_exists and prev_exists:
-            _restore_previous(
+            _try_restore_valid_previous(
                 store,
                 command,
                 previous_path=previous_path,
@@ -574,7 +621,7 @@ def _recover_with_marker(
                 previous_path, command=command, expected_committed_page_count=None
             ):
                 _quarantine_path(store, destination, f"{command}-destination-stale")
-                _restore_previous(
+                _try_restore_valid_previous(
                     store,
                     command,
                     previous_path=previous_path,
@@ -592,7 +639,7 @@ def _recover_with_marker(
             _remove_transaction(store, command)
             return
         if not dest_exists and not cand_exists and prev_exists:
-            _restore_previous(
+            _try_restore_valid_previous(
                 store,
                 command,
                 previous_path=previous_path,
@@ -641,11 +688,9 @@ def _recover_no_marker(store: RunStore, command: OutputCommand, *, head: int) ->
         if _validate_tree(destination, command=command, expected_committed_page_count=None):
             if previous_path.exists() or previous_path.is_symlink():
                 _quarantine_path(store, previous_path, f"{command}-previous-stale")
-        elif (previous_path.exists() or previous_path.is_symlink()) and _validate_tree(
-            previous_path, command=command, expected_committed_page_count=None
-        ):
+        elif previous_path.exists() or previous_path.is_symlink():
             _quarantine_path(store, destination, f"{command}-destination-invalid")
-            _restore_previous(
+            _try_restore_valid_previous(
                 store,
                 command,
                 previous_path=previous_path,
@@ -654,7 +699,7 @@ def _recover_no_marker(store: RunStore, command: OutputCommand, *, head: int) ->
         else:
             _quarantine_path(store, destination, f"{command}-destination-invalid")
     elif previous_path.exists() or previous_path.is_symlink():
-        _restore_previous(
+        _try_restore_valid_previous(
             store,
             command,
             previous_path=previous_path,

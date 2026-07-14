@@ -356,7 +356,7 @@ class RunStore:
         return path
 
     def _quarantine(self, recovery_dir: Path, src: Path, label: str) -> None:
-        if not src.exists():
+        if not src.exists() and not src.is_symlink():
             return
         dest = recovery_dir / label
         if dest.exists():
