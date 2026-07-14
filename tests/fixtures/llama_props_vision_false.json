@@ -7,8 +7,6 @@
   "modalities": {
     "vision": false
   },
-  "build_info": {
-    "commit": "novision123"
-  },
+  "build_info": "novision123",
   "chat_template": "template"
 }

@@ -4,8 +4,6 @@
   },
   "total_slots": 1,
   "model_path": "/models/text-only.gguf",
-  "build_info": {
-    "commit": "textonly123"
-  },
+  "build_info": "textonly123",
   "chat_template": "template"
 }

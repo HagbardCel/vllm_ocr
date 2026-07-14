@@ -117,6 +117,31 @@ def test_validate_same_page_footnotes(extraction_config) -> None:
     )
 
 
+def test_validate_duplicate_footnote_labels(extraction_config) -> None:
+    extraction_config.require_same_page_footnotes = True
+    assessment = make_assessment(
+        0,
+        PageInterpretation(
+            page_type=PageType.BODY,
+            blocks=[
+                TextBlock(
+                    role=TextRole.PARAGRAPH,
+                    content=[FootnoteReference(label="1")],
+                ),
+                FootnoteBlock(label="1", content=[TextRun(text="First.")]),
+                FootnoteBlock(label="1", content=[TextRun(text="Duplicate.")]),
+            ],
+        ),
+    )
+    with pytest.raises(StructuralError) as exc_info:
+        validate_assessment(
+            assessment=assessment,
+            state=BookState(),
+            config=extraction_config,
+        )
+    assert exc_info.value.code == "duplicate-footnote-label"
+
+
 def test_validate_complete_book_toc_not_exhausted() -> None:
     state = BookState(
         toc_status=TocStatus.COMMITTED,

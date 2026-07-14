@@ -6,10 +6,14 @@ from pathlib import Path
 
 from bookextract.models import (
     BookState,
+    CurrentSectionState,
     PageInterpretation,
     PageType,
     StructuralOpening,
     StructureKind,
+    TextBlock,
+    TextRole,
+    TextRun,
     TocEntry,
     TocStatus,
 )
@@ -79,3 +83,65 @@ def test_replay_matches_incremental_state(run_dir: Path) -> None:
     replayed = load_book_state_from_commits(store, 3)
     assert replayed.processed_page_count == state.processed_page_count
     assert replayed.toc_status == state.toc_status
+
+
+def test_three_page_continuation_tail_contents() -> None:
+    state = BookState(
+        current_section=CurrentSectionState(
+            kind=StructureKind.CHAPTER,
+            title="Ch1",
+            toc_index=0,
+            started_on_page=0,
+        )
+    )
+    page1 = make_assessment(
+        0,
+        PageInterpretation(
+            page_type=PageType.BODY,
+            blocks=[
+                TextBlock(
+                    role=TextRole.PARAGRAPH,
+                    content=[TextRun(text="alpha beta gamma")],
+                    continues_on_next_page=True,
+                )
+            ],
+        ),
+    )
+    state = apply_assessment(state, page1)
+    assert state.current_section is not None
+    assert state.current_section.open_paragraph_tail == "alpha beta gamma"
+
+    page2 = make_assessment(
+        1,
+        PageInterpretation(
+            page_type=PageType.BODY,
+            blocks=[
+                TextBlock(
+                    role=TextRole.PARAGRAPH,
+                    content=[TextRun(text="middle segment")],
+                    continues_previous=True,
+                    continues_on_next_page=True,
+                )
+            ],
+        ),
+    )
+    state = apply_assessment(state, page2)
+    assert state.current_section is not None
+    assert state.current_section.open_paragraph_tail == "middle segment"
+
+    page3 = make_assessment(
+        2,
+        PageInterpretation(
+            page_type=PageType.BODY,
+            blocks=[
+                TextBlock(
+                    role=TextRole.PARAGRAPH,
+                    content=[TextRun(text="final segment")],
+                    continues_previous=True,
+                )
+            ],
+        ),
+    )
+    state = apply_assessment(state, page3)
+    assert state.current_section is not None
+    assert state.current_section.open_paragraph_tail is None

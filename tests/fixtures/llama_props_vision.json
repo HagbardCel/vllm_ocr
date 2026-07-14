@@ -10,10 +10,7 @@
   "modalities": {
     "vision": true
   },
-  "build_info": {
-    "build_number": 5123,
-    "commit": "abc123def456"
-  },
+  "build_info": "b5123-abc123def456",
   "chat_template": "{% for message in messages %}{{ message.content }}{% endfor %}",
   "chat_template_caps": {
     "reasoning": true,

@@ -24,20 +24,35 @@ def _load_fixture(name: str) -> bytes:
 
 def test_props_parses_build_info_and_top_level_caps() -> None:
     props = LlamaPropsResponse.model_validate_json(_load_fixture("llama_props_vision.json"))
-    assert props.build_info is not None
-    assert props.build_info.commit == "abc123def456"
+    assert props.build_info == "b5123-abc123def456"
     assert props.chat_template_caps is not None
     assert props.chat_template_caps.get("apply_template") is True
     assert props.media_marker == "<__media__>"
 
 
-def test_llama_cpp_build_prefers_build_info_commit() -> None:
+def test_llama_cpp_build_prefers_build_info_string() -> None:
     config = ProcessingConfig(
         extraction=ExtractionConfig(model_alias="m", prompt_version="v1")
     )
     client = LlamaCppVisionClient(config)
     props = LlamaPropsResponse.model_validate_json(_load_fixture("llama_props_vision.json"))
-    assert client._llama_cpp_build_from_props(props) == "abc123def456"
+    assert client._llama_cpp_build_from_props(props) == "b5123-abc123def456"
+
+
+def test_llama_cpp_build_blank_build_info_falls_back_to_legacy() -> None:
+    config = ProcessingConfig(
+        extraction=ExtractionConfig(model_alias="m", prompt_version="v1")
+    )
+    client = LlamaCppVisionClient(config)
+    props = LlamaPropsResponse.model_validate(
+        {
+            "model_path": "/models/m.gguf",
+            "modalities": {"vision": True},
+            "build_info": "   ",
+            "build": "legacy-commit",
+        }
+    )
+    assert client._llama_cpp_build_from_props(props) == "legacy-commit"
 
 
 def test_require_vision_rejects_missing_modalities() -> None:
@@ -115,6 +130,6 @@ def test_preflight_accepts_vision_server() -> None:
     )
     client = LlamaCppVisionClient(config, client=http_client)
     preflight = client.preflight()
-    assert preflight.identity.llama_cpp_build == "abc123def456"
+    assert preflight.identity.llama_cpp_build == "b5123-abc123def456"
     assert preflight.identity.vision_supported is True
     assert preflight.capabilities.media_marker == "<__media__>"

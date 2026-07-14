@@ -66,6 +66,8 @@ def make_inference_environment() -> InferenceEnvironment:
         projector_binding="operator-asserted",
         token_counting_contract=ApplyTemplateTokenizeContract(
             mode="apply-template-tokenize",
+            apply_template_request_mode="messages-only",
+            input_projection="text-only",
             image_token_policy="configured-reserve",
             model_alias="test-model",
             llama_cpp_build="test-build",
@@ -88,6 +90,18 @@ def minimal_pdf(tmp_path: Path) -> Path:
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
     page.insert_text((72, 72), "Test page")
+    doc.save(pdf_path)
+    doc.close()
+    return pdf_path
+
+
+@pytest.fixture
+def multi_page_pdf(tmp_path: Path) -> Path:
+    pdf_path = tmp_path / "multi.pdf"
+    doc = fitz.open()
+    for _ in range(3):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 72), "Test page")
     doc.save(pdf_path)
     doc.close()
     return pdf_path

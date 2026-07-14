@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from bookextract.artifacts import InferenceAttempt, RequestSnapshot
+from bookextract.artifacts import (
+    InferenceAttempt,
+    PendingArtifact,
+    RequestSnapshot,
+    validate_artifact_filenames,
+)
+from bookextract.errors import ProcessingError
 
 
 def test_successful_attempt_cannot_carry_error() -> None:
@@ -22,3 +28,30 @@ def test_request_snapshot_stages() -> None:
     serialized = RequestSnapshot(stage="serialized", wire_request_sha256="abc")
     assert planned.wire_request_sha256 is None
     assert serialized.wire_request_sha256 == "abc"
+
+
+def test_validate_artifact_filenames_rejects_reserved_names() -> None:
+    with pytest.raises(ProcessingError) as exc_info:
+        validate_artifact_filenames(
+            (
+                PendingArtifact(
+                    logical_name="prompt",
+                    filename="page-assessment.json",
+                    media_type="text/plain",
+                    content=b"x",
+                ),
+            )
+        )
+    assert exc_info.value.code == "duplicate-artifact-name"
+
+
+def test_validate_artifact_filenames_rejects_duplicates() -> None:
+    artifact = PendingArtifact(
+        logical_name="prompt",
+        filename="prompt.txt",
+        media_type="text/plain",
+        content=b"x",
+    )
+    with pytest.raises(ProcessingError) as exc_info:
+        validate_artifact_filenames((artifact, artifact))
+    assert exc_info.value.code == "duplicate-artifact-name"
