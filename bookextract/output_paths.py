@@ -167,6 +167,15 @@ def validate_output_tree(
             message=f"expected exactly one {primary!r} in manifest.files",
         )
 
+    for entry in manifest.files:
+        if entry.path == primary:
+            continue
+        if parse_asset_sha256_from_path(entry.path) is None:
+            raise ProcessingError(
+                code="invalid-artifact-path",
+                message=f"non-asset path in manifest.files: {entry.path!r}",
+            )
+
     expected_files = {"manifest.json", *declared_paths}
     actual_files, problems = _walk_tree(path)
     if problems:
