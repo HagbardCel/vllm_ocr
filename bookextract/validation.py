@@ -237,14 +237,23 @@ def validate_footnotes(assessment: PageAssessment, config: ExtractionConfig) -> 
         return
 
     refs: set[str] = set()
-    notes: set[str] = set()
+    note_labels = [
+        block.label
+        for block in assessment.interpretation.blocks
+        if block.kind == "footnote"
+    ]
+    if len(note_labels) != len(set(note_labels)):
+        raise StructuralError(
+            code="duplicate-footnote-label",
+            message=f"duplicate footnote labels on page {assessment.page_index}",
+        )
+    notes: set[str] = set(note_labels)
+
     for block in assessment.interpretation.blocks:
         if block.kind == "text":
             for segment in block.content:
                 if segment.kind == "footnote_reference":
                     refs.add(segment.label)
-        elif block.kind == "footnote":
-            notes.add(block.label)
 
     for label in refs - notes:
         raise StructuralError(
@@ -258,11 +267,6 @@ def validate_footnotes(assessment: PageAssessment, config: ExtractionConfig) -> 
         raise StructuralError(
             code="orphan-footnote",
             message=f"orphan footnote body {label!r} on page {assessment.page_index}",
-        )
-    if len(notes) != len({label for label in notes}):
-        raise StructuralError(
-            code="duplicate-footnote-label",
-            message=f"duplicate footnote labels on page {assessment.page_index}",
         )
 
 
