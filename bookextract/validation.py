@@ -172,18 +172,61 @@ def validate_continuations(assessment: PageAssessment, state: BookState) -> None
                 message="chapter opening with open paragraph from prior page",
             )
 
-    continuing = [
+    body_paragraphs = [
         block
         for block in interpretation.blocks
-        if block.kind == "text" and block.continues_previous
+        if block.kind == "text" and block.role == TextRole.PARAGRAPH
     ]
-    if continuing and not (
-        state.current_section and state.current_section.open_paragraph_tail
-    ):
+    continuing = [block for block in body_paragraphs if block.continues_previous]
+    open_tail = (
+        state.current_section.open_paragraph_tail
+        if state.current_section
+        else None
+    )
+
+    if open_tail and not continuing:
+        raise StructuralError(
+            code="missing-continuation",
+            message=(
+                f"open paragraph tail without continues_previous on page "
+                f"{assessment.page_index}"
+            ),
+        )
+    if continuing and not open_tail:
         raise StructuralError(
             code="continuation-without-source",
             message=(
                 f"continues_previous without open paragraph on page "
+                f"{assessment.page_index}"
+            ),
+        )
+    if len(continuing) > 1:
+        raise StructuralError(
+            code="invalid-continuation-layout",
+            message=f"multiple continues_previous paragraphs on page {assessment.page_index}",
+        )
+    if continuing and body_paragraphs and continuing[0] is not body_paragraphs[0]:
+        raise StructuralError(
+            code="invalid-continuation-layout",
+            message=(
+                f"continues_previous is not the first body paragraph on page "
+                f"{assessment.page_index}"
+            ),
+        )
+    closers = [block for block in body_paragraphs if block.continues_on_next_page]
+    if len(closers) > 1:
+        raise StructuralError(
+            code="invalid-continuation-layout",
+            message=(
+                f"multiple continues_on_next_page paragraphs on page "
+                f"{assessment.page_index}"
+            ),
+        )
+    if closers and body_paragraphs and closers[-1] is not body_paragraphs[-1]:
+        raise StructuralError(
+            code="invalid-continuation-layout",
+            message=(
+                f"continues_on_next_page is not the last body paragraph on page "
                 f"{assessment.page_index}"
             ),
         )
@@ -215,6 +258,11 @@ def validate_footnotes(assessment: PageAssessment, config: ExtractionConfig) -> 
         raise StructuralError(
             code="orphan-footnote",
             message=f"orphan footnote body {label!r} on page {assessment.page_index}",
+        )
+    if len(notes) != len({label for label in notes}):
+        raise StructuralError(
+            code="duplicate-footnote-label",
+            message=f"duplicate footnote labels on page {assessment.page_index}",
         )
 
 
