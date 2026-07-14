@@ -6,13 +6,31 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import cast
 
 from bookextract.config import EpubRenderConfig
 from bookextract.errors import ExternalToolError, ProcessingError
 from bookextract.models import PublicationDocument, PublicationMetadata
 
-REQUIRED_BASE_DEFAULT_KEYS = frozenset({"from", "to", "split-level"})
+REQUIRED_BASE_DEFAULTS: dict[str, object] = {
+    "from": "markdown+footnotes",
+    "to": "epub3",
+    "split-level": 1,
+}
+
+
+def _validate_base_defaults(base: object) -> dict[str, object]:
+    if not isinstance(base, dict):
+        raise ProcessingError(code="unsupported-pandoc-defaults")
+
+    if set(base) != set(REQUIRED_BASE_DEFAULTS):
+        raise ProcessingError(code="unsupported-pandoc-defaults")
+
+    for key, expected in REQUIRED_BASE_DEFAULTS.items():
+        actual = base[key]
+        if type(actual) is not type(expected) or actual != expected:
+            raise ProcessingError(code="unsupported-pandoc-defaults")
+
+    return base
 
 
 def epubcheck_argv(
@@ -48,18 +66,22 @@ class EpubRenderer:
         self._defaults_path = pandoc_defaults_path
 
     def _load_base_defaults(self) -> dict[str, object]:
-        if self._defaults_path is None:
-            from importlib import resources
+        try:
+            if self._defaults_path is None:
+                from importlib import resources
 
-            text = resources.files("bookextract.resources").joinpath(
-                "pandoc-epub-v1.json"
-            ).read_text(encoding="utf-8")
-            base = json.loads(text)
-        else:
-            base = json.loads(self._defaults_path.read_text(encoding="utf-8"))
-        if set(base.keys()) != REQUIRED_BASE_DEFAULT_KEYS:
-            raise ProcessingError(code="unsupported-pandoc-defaults")
-        return cast(dict[str, object], base)
+                text = resources.files("bookextract.resources").joinpath(
+                    "pandoc-epub-v1.json"
+                ).read_text(encoding="utf-8")
+            else:
+                text = self._defaults_path.read_text(encoding="utf-8")
+            raw = json.loads(text)
+        except (OSError, ValueError, TypeError) as exc:
+            raise ProcessingError(
+                code="unsupported-pandoc-defaults",
+                message="cannot load frozen Pandoc defaults",
+            ) from exc
+        return _validate_base_defaults(raw)
 
     def run_epubcheck(self, epub_path: Path, *, report_path: Path) -> None:
         command = epubcheck_argv(self._config, epub_path, report_path)
@@ -119,7 +141,7 @@ class EpubRenderer:
 
         assets_src = markdown_path.parent / "assets"
         assets_dest = build_dir / "assets"
-        if assets_src.is_dir():
+        if assets_src.is_dir() and assets_src.resolve() != assets_dest.resolve():
             if assets_dest.exists():
                 shutil.rmtree(assets_dest)
             shutil.copytree(assets_src, assets_dest)

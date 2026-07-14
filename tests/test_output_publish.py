@@ -25,6 +25,7 @@ from bookextract.models import (
 )
 from bookextract.output_paths import validate_output_tree
 from bookextract.output_publish import (
+    begin_output_transaction,
     output_destination,
     recover_output_transaction,
 )
@@ -68,6 +69,43 @@ def _write_manifest(
     )
     (root / primary).write_bytes(primary_bytes)
     write_json_atomic(root / "manifest.json", manifest.model_dump(mode="json"))
+
+
+def _assert_recovery_artifacts_cleared(store: RunStore, command: str) -> None:
+    build = store._path(".output-build")
+    marker = build / f"{command}.transaction.json"
+    previous = build / f"{command}.previous"
+    if marker.exists() or marker.is_symlink():
+        raise AssertionError(f"transaction marker still present: {marker}")
+    if previous.exists() or previous.is_symlink():
+        raise AssertionError(f"previous tree still present: {previous}")
+    for entry in build.iterdir():
+        if entry.name.startswith(f"{command}.candidate."):
+            raise AssertionError(f"candidate tree still present: {entry}")
+        if entry.name.startswith(f"{command}.work."):
+            raise AssertionError(f"work tree still present: {entry}")
+
+
+def _invalid_previous_quarantined(store: RunStore, command: str) -> bool:
+    recovery_root = store._path("recovery")
+    if not recovery_root.is_dir():
+        return False
+    label = f"{command}-previous-invalid"
+    return any((rec_dir / label).exists() for rec_dir in recovery_root.iterdir())
+
+
+def _write_invalid_previous(build: Path, *, command: str = "markdown") -> Path:
+    previous = build / f"{command}.previous"
+    previous.mkdir()
+    _write_manifest(
+        previous,
+        command=command,
+        committed_page_count=1,
+        primary="book.md",
+        primary_bytes=b"# invalid\n",
+        sha256_override="0" * 64,
+    )
+    return previous
 
 
 def test_validate_output_tree_rejects_extra_file(run_dir: Path) -> None:
@@ -317,3 +355,106 @@ def test_swapped_candidate_basename_quarantines_marker(run_dir: Path) -> None:
     destination = output_destination(store, "markdown")
     assert (destination / "book.md").read_text(encoding="utf-8") == "# previous\n"
     assert not (build / "markdown.transaction.json").exists()
+
+
+def test_invalid_previous_not_restored_no_marker(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    store.write_head(1)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _write_invalid_previous(build)
+
+    recover_output_transaction(store, "markdown")
+
+    destination = output_destination(store, "markdown")
+    if destination.exists() or destination.is_symlink():
+        raise AssertionError("destination should be absent")
+    _assert_recovery_artifacts_cleared(store, "markdown")
+    if not _invalid_previous_quarantined(store, "markdown"):
+        raise AssertionError("invalid previous not quarantined")
+
+
+def test_invalid_previous_not_restored_after_malformed_marker(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    store.write_head(1)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _write_invalid_previous(build)
+    (build / "markdown.transaction.json").write_text("{not json", encoding="utf-8")
+
+    recover_output_transaction(store, "markdown")
+
+    destination = output_destination(store, "markdown")
+    if destination.exists() or destination.is_symlink():
+        raise AssertionError("destination should be absent")
+    _assert_recovery_artifacts_cleared(store, "markdown")
+    if not _invalid_previous_quarantined(store, "markdown"):
+        raise AssertionError("invalid previous not quarantined")
+
+
+@pytest.mark.parametrize("phase", ["candidate-valid", "previous-moved"])
+def test_invalid_previous_not_restored_active_transaction(
+    run_dir: Path,
+    phase: str,
+) -> None:
+    store = RunStore(run_dir)
+    store.write_head(1)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _write_invalid_previous(build)
+    write_json_atomic(
+        build / "markdown.transaction.json",
+        OutputTransaction(
+            output_transaction_format_version=1,
+            command="markdown",
+            phase=phase,  # type: ignore[arg-type]
+            candidate="markdown.candidate.0123456789abcdef",
+            previous="markdown.previous",
+        ).model_dump(mode="json"),
+    )
+
+    recover_output_transaction(store, "markdown")
+
+    destination = output_destination(store, "markdown")
+    if destination.exists() or destination.is_symlink():
+        raise AssertionError("destination should be absent")
+    _assert_recovery_artifacts_cleared(store, "markdown")
+    if not _invalid_previous_quarantined(store, "markdown"):
+        raise AssertionError("invalid previous not quarantined")
+
+
+@pytest.mark.parametrize(
+    "marker_setup",
+    [
+        "directory",
+        "valid-symlink",
+        "broken-symlink",
+    ],
+)
+def test_non_regular_transaction_marker_quarantined(
+    run_dir: Path,
+    tmp_path: Path,
+    marker_setup: str,
+) -> None:
+    store = RunStore(run_dir)
+    store.write_head(1)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    marker = build / "markdown.transaction.json"
+
+    if marker_setup == "directory":
+        marker.mkdir()
+    elif marker_setup == "valid-symlink":
+        real = tmp_path / "real-marker.json"
+        real.write_text("{}", encoding="utf-8")
+        marker.symlink_to(real)
+    else:
+        marker.symlink_to(tmp_path / "missing-marker.json")
+
+    recover_output_transaction(store, "markdown")
+
+    if marker.exists() or marker.is_symlink():
+        raise AssertionError("obstructing marker still present")
+    candidate_path, _ = begin_output_transaction(store, "markdown")
+    if not candidate_path.is_dir():
+        raise AssertionError("begin_output_transaction failed after marker quarantine")
