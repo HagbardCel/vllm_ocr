@@ -458,6 +458,23 @@ class LlamaCppVisionClient:
                     self._sleep_backoff(attempt_number, exc.retry_after_seconds)
                     continue
                 break
+            except _CompletionFailure as exc:
+                if exc.status_code is None and exc.response_body is None:
+                    raise
+                elapsed_ms = (time.monotonic() - started) * 1000
+                attempts.append(
+                    InferenceAttempt(
+                        attempt_number=attempt_number,
+                        succeeded=False,
+                        status_code=exc.status_code,
+                        response_body=exc.response_body,
+                        content_type=exc.content_type,
+                        error_code=exc.code,
+                        error_message=str(exc),
+                        elapsed_ms=elapsed_ms,
+                    )
+                )
+                break
 
             elapsed_ms = (time.monotonic() - started) * 1000
             finish_reason = (
@@ -620,13 +637,19 @@ class LlamaCppVisionClient:
                 raise _ProbeTransient(response.status_code)
             if response.status_code != 200:
                 if discovery:
-                    return None
+                    raise ProcessingError(
+                        code="token-counting-calibration-failed",
+                        message=f"input_tokens returned HTTP {response.status_code}",
+                    )
                 raise ProcessingError(code="token-counting-contract-drift")
             try:
                 parsed = LlamaInputTokensResponse.model_validate_json(response.content)
             except ValidationError:
                 if discovery:
-                    return None
+                    raise ProcessingError(
+                        code="token-counting-calibration-failed",
+                        message="input_tokens returned malformed successful response",
+                    ) from None
                 raise ProcessingError(code="token-counting-contract-drift") from None
             return parsed.input_tokens
 
@@ -669,9 +692,9 @@ class LlamaCppVisionClient:
                     for part in cast(list[dict[str, Any]], content)
                     if part.get("type") != "image_url"
                 ]
-                messages.append({"role": message["role"], "content": text_only_parts})
+                messages.append({**message, "content": text_only_parts})
             else:
-                messages.append({"role": message["role"], "content": content})
+                messages.append({**message, "content": content})
         return messages
 
     def _text_only_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -905,12 +928,17 @@ class LlamaCppVisionClient:
                 retry_after_seconds=retry_after,
             )
 
+        content_type = response.headers.get("Content-Type")
+
         try:
             envelope_data = json.loads(raw_body)
         except json.JSONDecodeError as exc:
             raise _CompletionFailure(
                 "invalid-http-response",
                 "response body is not valid JSON",
+                status_code=response.status_code,
+                response_body=raw_body,
+                content_type=content_type,
             ) from exc
 
         try:
@@ -919,6 +947,9 @@ class LlamaCppVisionClient:
             raise _CompletionFailure(
                 "invalid-completion-envelope",
                 f"invalid completion envelope: {exc}",
+                status_code=response.status_code,
+                response_body=raw_body,
+                content_type=content_type,
             ) from exc
 
         return envelope, response.status_code, raw_body
@@ -1452,6 +1483,17 @@ class _TransportFailure(Exception):
 
 
 class _CompletionFailure(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_body: bytes | None = None,
+        content_type: str | None = None,
+    ) -> None:
         self.code = code
+        self.status_code = status_code
+        self.response_body = response_body
+        self.content_type = content_type
         super().__init__(message)
