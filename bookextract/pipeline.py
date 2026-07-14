@@ -53,8 +53,11 @@ def _collect_figure_assets(
             updated_blocks.append(block)
             continue
         block_suffix = figure.block_id or "figure"
-        rel_path = f"assets/{block_suffix}.png"
+        del block_suffix
         png_bytes, asset_sha256 = crop_figure_asset(rendered, figure.bbox)
+        from bookextract.output_paths import figure_asset_path
+
+        rel_path = figure_asset_path(asset_sha256)
         extra_files[rel_path] = png_bytes
         updated_blocks.append(figure.model_copy(update={"asset_sha256": asset_sha256}))
     return interpretation.model_copy(update={"blocks": updated_blocks}), extra_files

@@ -53,8 +53,10 @@ class MarkdownRenderer:
                 footnote_defs.append((label, text))
             elif block.kind == "figure":
                 caption = block.caption or ""
-                asset = block.asset_sha256[:12]
-                lines.extend([f"![{caption}](assets/{asset}.png)", ""])
+                asset = block.asset_sha256
+                from bookextract.output_paths import figure_asset_path
+
+                lines.extend([f"![{caption}]({figure_asset_path(asset)})", ""])
             elif block.kind == "separator":
                 lines.extend(["---", ""])
 
