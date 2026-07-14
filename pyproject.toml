@@ -27,6 +27,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["bookextract"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/bookextract/schemas",
+    "/bookextract/resources",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

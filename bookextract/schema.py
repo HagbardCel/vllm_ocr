@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from importlib import resources
 from typing import Any
 
 WIRE_SCHEMA_VERSION = "vlm-page-response-v1"
-
-_SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
 
 _STRIP_SCHEMA_KEYS = frozenset(
     {
@@ -24,16 +22,15 @@ _STRIP_SCHEMA_KEYS = frozenset(
 )
 
 
-def _schema_path(version: str = WIRE_SCHEMA_VERSION) -> Path:
-    return _SCHEMAS_DIR / f"{version}.json"
+def _schema_text(version: str = WIRE_SCHEMA_VERSION) -> str:
+    filename = f"{version}.json"
+    return resources.files("bookextract.schemas").joinpath(filename).read_text(encoding="utf-8")
 
 
 def load_wire_schema(version: str = WIRE_SCHEMA_VERSION) -> dict[str, object]:
-    path = _schema_path(version)
-    with path.open(encoding="utf-8") as handle:
-        loaded = json.load(handle)
+    loaded = json.loads(_schema_text(version))
     if not isinstance(loaded, dict):
-        raise ValueError(f"wire schema must be a JSON object: {path}")
+        raise ValueError(f"wire schema must be a JSON object: {version}")
     return loaded
 
 

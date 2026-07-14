@@ -26,11 +26,14 @@ class EpubRenderer:
 
     def _load_base_defaults(self) -> dict[str, object]:
         if self._defaults_path is None:
-            package_root = Path(__file__).resolve().parents[2]
-            path = package_root / "resources" / "pandoc-epub-v1.json"
+            from importlib import resources
+
+            text = resources.files("bookextract.resources").joinpath(
+                "pandoc-epub-v1.json"
+            ).read_text(encoding="utf-8")
+            base = json.loads(text)
         else:
-            path = self._defaults_path
-        base = json.loads(path.read_text(encoding="utf-8"))
+            base = json.loads(self._defaults_path.read_text(encoding="utf-8"))
         if set(base.keys()) != REQUIRED_BASE_DEFAULT_KEYS:
             raise ProcessingError(code="unsupported-pandoc-defaults")
         return cast(dict[str, object], base)

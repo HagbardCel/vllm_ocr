@@ -1,0 +1,5 @@
+{
+  "from": "markdown+footnotes",
+  "to": "epub3",
+  "split-level": 1
+}
