@@ -136,3 +136,51 @@ def test_reject_symlink_components(tmp_path: Path) -> None:
     link.symlink_to(real)
     with pytest.raises(ProcessingError, match="symlink"):
         reject_symlink_components(link / "child")
+
+
+def test_recover_rejects_missing_head_with_commits(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    files = {
+        "page-assessment.json": b"{}\n",
+        "page-context.json": b"{}\n",
+        "interpretation.json": b"{}\n",
+        "provenance.json": b"{}\n",
+    }
+    store.write_commit(1, files)
+    commit_dir = run_dir / "commits" / "page-0001"
+    assert commit_dir.is_dir()
+
+    (run_dir / "head.json").unlink()
+    with pytest.raises(ProcessingError, match="missing or invalid head.json"):
+        store.recover()
+    assert commit_dir.is_dir()
+
+
+@pytest.mark.parametrize(
+    "head_payload",
+    [
+        "{not json",
+        '{"head_format_version": 99, "committed_page_count": 0}',
+        '{"committed_page_count": 0}',
+    ],
+    ids=["invalid-json", "bad-version", "missing-version"],
+)
+def test_recover_rejects_malformed_head_with_commits(
+    run_dir: Path,
+    head_payload: str,
+) -> None:
+    store = RunStore(run_dir)
+    files = {
+        "page-assessment.json": b"{}\n",
+        "page-context.json": b"{}\n",
+        "interpretation.json": b"{}\n",
+        "provenance.json": b"{}\n",
+    }
+    store.write_commit(1, files)
+    commit_dir = run_dir / "commits" / "page-0001"
+    assert commit_dir.is_dir()
+
+    (run_dir / "head.json").write_text(head_payload, encoding="utf-8")
+    with pytest.raises(ProcessingError, match="invalid"):
+        store.recover()
+    assert commit_dir.is_dir()

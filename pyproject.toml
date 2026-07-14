@@ -29,8 +29,7 @@ packages = ["bookextract"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/bookextract/schemas",
-    "/bookextract/resources",
+    "/bookextract",
 ]
 
 [tool.pytest.ini_options]

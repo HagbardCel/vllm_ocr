@@ -109,6 +109,7 @@ def test_partial_run_does_not_validate_complete_book(
     run_dir = tmp_path / "partial-run"
     store = RunStore(run_dir)
     store.ensure_layout()
+    store.write_head(0)
     write_json_atomic(
         run_dir / "run.json",
         RunRecord(

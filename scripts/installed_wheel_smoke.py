@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import json
+import os
 import subprocess
 import sys
 import tempfile
-from importlib import resources
 from pathlib import Path
 
 
@@ -27,11 +26,21 @@ def main(argv: list[str] | None = None) -> int:
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
         python = venv_dir / "bin" / "python"
         subprocess.run([str(python), "-m", "pip", "install", str(wheel_path)], check=True)
+        smoke_cwd = Path(tmp) / "smoke-cwd"
+        smoke_cwd.mkdir()
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
         script = """
 import json
+import sys
 from importlib import resources
+from pathlib import Path
+
 import bookextract
 from bookextract.schema import load_wire_schema
+
+package_path = Path(bookextract.__file__).resolve()
+assert package_path.is_relative_to(Path(sys.prefix).resolve())
 
 schema = load_wire_schema()
 assert isinstance(schema, dict)
@@ -40,7 +49,14 @@ parsed = json.loads(defaults)
 assert parsed["from"] == "markdown+footnotes"
 print("wheel-smoke-ok")
 """
-        result = subprocess.run([str(python), "-c", script], check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            [str(python), "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=smoke_cwd,
+            env=env,
+        )
         if "wheel-smoke-ok" not in result.stdout:
             print(result.stdout, file=sys.stderr)
             print(result.stderr, file=sys.stderr)

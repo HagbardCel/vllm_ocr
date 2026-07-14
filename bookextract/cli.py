@@ -544,7 +544,10 @@ def cmd_render_epub(args: argparse.Namespace) -> int:
                     metadata=pub_doc.metadata,
                     build_directory=work_path,
                 )
-                epub_renderer.run_epubcheck(epub_path)
+                epub_renderer.run_epubcheck(
+                    epub_path,
+                    report_path=work_path / "epubcheck.json",
+                )
                 write_output_bundle(
                     candidate_path,
                     command="epub",

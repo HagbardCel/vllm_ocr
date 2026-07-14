@@ -15,10 +15,26 @@ from bookextract.models import PublicationDocument, PublicationMetadata
 REQUIRED_BASE_DEFAULT_KEYS = frozenset({"from", "to", "split-level"})
 
 
-def epubcheck_argv(config: EpubRenderConfig, epub_path: Path) -> list[str]:
+def epubcheck_argv(
+    config: EpubRenderConfig,
+    epub_path: Path,
+    report_path: Path,
+) -> list[str]:
     if config.epubcheck_jar_path is not None:
-        return ["java", "-jar", str(config.epubcheck_jar_path.resolve()), str(epub_path.resolve())]
-    return [config.epubcheck_executable, str(epub_path.resolve())]
+        return [
+            "java",
+            "-jar",
+            str(config.epubcheck_jar_path.resolve()),
+            "--json",
+            str(report_path.resolve()),
+            str(epub_path.resolve()),
+        ]
+    return [
+        config.epubcheck_executable,
+        "--json",
+        str(report_path.resolve()),
+        str(epub_path.resolve()),
+    ]
 
 
 class EpubRenderer:
@@ -45,8 +61,8 @@ class EpubRenderer:
             raise ProcessingError(code="unsupported-pandoc-defaults")
         return cast(dict[str, object], base)
 
-    def run_epubcheck(self, epub_path: Path) -> None:
-        command = epubcheck_argv(self._config, epub_path)
+    def run_epubcheck(self, epub_path: Path, *, report_path: Path) -> None:
+        command = epubcheck_argv(self._config, epub_path, report_path)
         try:
             subprocess.run(
                 command,
@@ -59,10 +75,10 @@ class EpubRenderer:
                 code="epubcheck-failed",
                 message=exc.stderr or exc.stdout or str(exc),
             ) from exc
-        except FileNotFoundError as exc:
+        except OSError as exc:
             raise ExternalToolError(
                 code="epubcheck-failed",
-                message=f"EPUBCheck executable not found: {command[0]}",
+                message=f"cannot execute EPUBCheck: {exc}",
             ) from exc
 
     def render(
@@ -130,6 +146,11 @@ class EpubRenderer:
             raise ExternalToolError(
                 code="pandoc-failed",
                 message=exc.stderr or str(exc),
+            ) from exc
+        except OSError as exc:
+            raise ExternalToolError(
+                code="pandoc-failed",
+                message=f"cannot execute Pandoc: {exc}",
             ) from exc
 
         produced = build_dir / "book.epub"

@@ -161,6 +161,15 @@ def _collect_raw_blocks(
                     TextRole.PAGE_NUMBER,
                 ):
                     continue
+                if text_block.continues_previous or text_block.continues_on_next_page:
+                    if text_block.role != TextRole.PARAGRAPH:
+                        raise StructuralError(
+                            code="invalid-continuation-layout",
+                            message=(
+                                f"continuation flags on non-paragraph block "
+                                f"on page {page_index}"
+                            ),
+                        )
                 content = _rewrite_footnote_refs(
                     _inline_to_publication(text_block.content),
                     page_index=page_index,
@@ -229,11 +238,12 @@ def _merge_continuations(
     output: list[_RawBlock] = []
     provenance: list[list[tuple[int, str | None]]] = []
     open_index: int | None = None
+    open_page_index: int | None = None
     intervening = False
 
     for item in raw_blocks:
         if item.block.kind == "text" and item.continues_previous:
-            if open_index is None:
+            if open_index is None or open_page_index is None:
                 raise StructuralError(
                     code="continuation-without-source",
                     message=(
@@ -255,6 +265,24 @@ def _merge_continuations(
                     code="invalid-continuation-layout",
                     message="continuation target is not a text block",
                 )
+            if open_item.block.role != TextRole.PARAGRAPH:
+                raise StructuralError(
+                    code="invalid-continuation-layout",
+                    message="continuation source is not a paragraph",
+                )
+            if item.block.role != TextRole.PARAGRAPH:
+                raise StructuralError(
+                    code="invalid-continuation-layout",
+                    message="continuation block is not a paragraph",
+                )
+            if item.page_index != open_page_index + 1:
+                raise StructuralError(
+                    code="invalid-continuation-layout",
+                    message=(
+                        f"continues_previous on page {item.page_index} "
+                        f"without adjacent source page {open_page_index}"
+                    ),
+                )
             merged_content = _merge_publication_content(
                 open_item.block.content,
                 item.block.content,
@@ -268,10 +296,11 @@ def _merge_continuations(
             )
             provenance[open_index].append((item.page_index, item.block_id))
             if item.continues_on_next_page:
-                open_index = open_index
+                open_page_index = item.page_index
                 intervening = False
             else:
                 open_index = None
+                open_page_index = None
                 intervening = False
             continue
 
@@ -279,6 +308,7 @@ def _merge_continuations(
         provenance.append([(item.page_index, item.block_id)])
         if item.block.kind == "text" and item.continues_on_next_page:
             open_index = len(output) - 1
+            open_page_index = item.page_index
             intervening = False
         elif open_index is not None:
             intervening = True
