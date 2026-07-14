@@ -1,0 +1,20 @@
+{
+  "default_generation_settings": {
+    "n_ctx": 32768,
+    "chat_template_caps": {
+      "applied_template_probe": true
+    }
+  },
+  "total_slots": 1,
+  "model_path": "/models/vision-model.gguf",
+  "modalities": {
+    "vision": true
+  },
+  "build_info": "b5123-abc123def456",
+  "chat_template": "{% for message in messages %}{{ message.content }}{% endfor %}",
+  "chat_template_caps": {
+    "reasoning": true,
+    "apply_template": true
+  },
+  "media_marker": "<__media__>"
+}
