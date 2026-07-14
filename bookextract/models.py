@@ -360,6 +360,13 @@ class TextOnlyInputTokensContract(DomainModel):
 
 class ApplyTemplateTokenizeContract(DomainModel):
     mode: Literal["apply-template-tokenize"]
+    apply_template_request_mode: Literal[
+        "messages-only",
+        "messages-plus-chat-template-kwargs",
+    ]
+    input_projection: Literal["text-only"] = "text-only"
+    tokenize_add_special: Literal[False] = False
+    tokenize_parse_special: Literal[True] = True
     image_token_policy: Literal["configured-reserve"]
     model_alias: str
     llama_cpp_build: str

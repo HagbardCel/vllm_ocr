@@ -77,15 +77,10 @@ class LlamaModelsResponse(LlamaWireModel):
     data: list[LlamaModelEntry]
 
 
-class LlamaPropsBuildInfo(LlamaWireModel):
-    build_number: int | None = None
-    commit: str | None = None
-
-
 class LlamaPropsResponse(LlamaWireModel):
     build_commit: str | None = Field(default=None, alias="build")
     build_number: int | None = None
-    build_info: LlamaPropsBuildInfo | None = None
+    build_info: str | None = None
     model_path: str | None = None
     default_generation_settings: dict[str, Any] | None = None
     chat_template: str | None = None
@@ -281,16 +276,10 @@ class LlamaCppVisionClient:
                 return contract
 
         if self._apply_template_tokenize_supported(
-            image_payload,
-            thinking_contract=thinking_contract,
+            preflight,
+            text_payload=text_payload,
         ):
-            return ApplyTemplateTokenizeContract(
-                mode="apply-template-tokenize",
-                image_token_policy="configured-reserve",
-                model_alias=identity.model_alias,
-                llama_cpp_build=identity.llama_cpp_build,
-                chat_template_sha256=identity.chat_template_sha256,
-            )
+            return self._build_apply_template_contract(preflight)
 
         return EstimateOnlyContract(
             mode="estimate-only",
@@ -314,8 +303,10 @@ class LlamaCppVisionClient:
             )
             try:
                 self._run_thinking_calibration_probes(contract, response_format)
-            except ProcessingError:
+            except _ThinkingCandidateRejected:
                 continue
+            except InferenceError:
+                raise
             return contract
 
         raise ProcessingError(code="unsupported-thinking-control")
@@ -332,12 +323,21 @@ class LlamaCppVisionClient:
         wire_body = serialize_wire_request(payload)
         try:
             response = self._post_completion(wire_body, allow_retry=True)
-        except InferenceError as exc:
-            if exc.code == "thinking-smoke-unavailable":
-                raise
-            raise ProcessingError(code="thinking-control-contract-drift", message=exc.code) from exc
+        except InferenceError:
+            raise
+        except ProcessingError as exc:
+            raise ProcessingError(
+                code="thinking-control-contract-drift",
+                message=exc.code,
+            ) from exc
 
-        self._enforce_non_thinking_response(response, contract)
+        try:
+            self._enforce_non_thinking_response(response, contract, smoke=True)
+        except ProcessingError as exc:
+            raise ProcessingError(
+                code="thinking-control-contract-drift",
+                message=exc.code,
+            ) from exc
         try:
             content = response.choices[0].message.content or ""
             VlmPageResponse.model_validate_json(content)
@@ -435,8 +435,6 @@ class LlamaCppVisionClient:
                 parsed, status_code, raw_body = self._complete_with_raw(wire_body)
             except _TransportFailure as exc:
                 elapsed_ms = (time.monotonic() - started) * 1000
-                if exc.error_code == "http-server-error":
-                    server_error_retries_used += 1
                 attempts.append(
                     InferenceAttempt(
                         attempt_number=attempt_number,
@@ -449,15 +447,17 @@ class LlamaCppVisionClient:
                         elapsed_ms=elapsed_ms,
                     )
                 )
-                if not self._may_retry(
+                if self._may_retry(
                     exc.error_code,
                     attempt_number=attempt_number,
                     max_attempts=max_attempts,
                     server_error_retries_used=server_error_retries_used,
                 ):
-                    break
-                self._sleep_backoff(attempt_number, exc.retry_after_seconds)
-                continue
+                    if exc.error_code == "http-server-error":
+                        server_error_retries_used += 1
+                    self._sleep_backoff(attempt_number, exc.retry_after_seconds)
+                    continue
+                break
 
             elapsed_ms = (time.monotonic() - started) * 1000
             finish_reason = (
@@ -591,7 +591,7 @@ class LlamaCppVisionClient:
         if contract.mode in {"chat-input-tokens-multimodal", "chat-input-tokens-text-only"}:
             return self._probe_input_tokens(payload, discovery=discovery)
         if contract.mode == "apply-template-tokenize":
-            return self._probe_apply_template_tokenize(payload, discovery=discovery)
+            return self._count_apply_template_tokenize(payload, contract, discovery=discovery)
         if contract.mode == "estimate-only":
             return self._estimate_tokens(payload)
         return None
@@ -634,45 +634,47 @@ class LlamaCppVisionClient:
 
         return self._run_budget_probe(attempt, discovery=discovery)
 
-    def _probe_apply_template_tokenize(
+    def _count_apply_template_tokenize(
         self,
         payload: dict[str, Any],
+        contract: ApplyTemplateTokenizeContract,
         *,
         discovery: bool,
     ) -> int | None:
-        wire_body = serialize_wire_request(payload)
+        messages = self._text_only_messages(payload)
+        apply_body: dict[str, Any] = {"messages": messages}
+        if contract.apply_template_request_mode == "messages-plus-chat-template-kwargs":
+            apply_body["chat_template_kwargs"] = {"enable_thinking": False}
 
-        def attempt() -> int | None:
-            for endpoint in ("/apply-template", "/tokenize"):
-                response = self._client.post(
-                    endpoint,
-                    content=wire_body,
-                    headers={"Content-Type": "application/json"},
-                )
-                if response.status_code == 404:
-                    continue
-                if response.status_code in _TRANSIENT_STATUS_CODES:
-                    raise _ProbeTransient(response.status_code)
-                if response.status_code != 200:
-                    if discovery:
-                        return None
-                    raise ProcessingError(code="token-counting-contract-drift")
-                try:
-                    body = json.loads(response.content)
-                except json.JSONDecodeError:
-                    if discovery:
-                        return None
-                    raise ProcessingError(code="token-counting-contract-drift") from None
-                if isinstance(body, dict):
-                    for key in ("tokens", "input_tokens", "n_tokens"):
-                        value = body.get(key)
-                        if isinstance(value, int):
-                            return value
-                if isinstance(body, list):
-                    return len(body)
+        prompt = self._request_apply_template(
+            apply_body,
+            discovery=discovery,
+            extended=contract.apply_template_request_mode
+            == "messages-plus-chat-template-kwargs",
+        )
+        if prompt is None:
             return None
+        return self._request_tokenize(
+            prompt,
+            add_special=contract.tokenize_add_special,
+            parse_special=contract.tokenize_parse_special,
+            discovery=discovery,
+        )
 
-        return self._run_budget_probe(attempt, discovery=discovery)
+    def _text_only_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for message in cast(list[dict[str, Any]], payload.get("messages", [])):
+            content = message.get("content")
+            if isinstance(content, list):
+                text_parts = [
+                    str(part.get("text", ""))
+                    for part in cast(list[dict[str, Any]], content)
+                    if part.get("type") == "text"
+                ]
+                messages.append({"role": message["role"], "content": "\n".join(text_parts)})
+            else:
+                messages.append({"role": message["role"], "content": content})
+        return messages
 
     def _run_budget_probe(self, fn: Any, *, discovery: bool) -> int | None:
         for probe_attempt in range(2):
@@ -683,39 +685,36 @@ class LlamaCppVisionClient:
                 if probe_attempt == 0:
                     time.sleep(self._config.process.retry_backoff_seconds)
                     continue
-                if discovery:
-                    return None
-                raise InferenceError(
-                    code="context-budget-probe-unavailable",
-                    retryable=True,
-                    attempts_exhausted=False,
-                    context=self._empty_failure_context(),
-                ) from None
+                self._raise_counting_probe_transient(discovery)
             except httpx.TimeoutException as exc:
                 if probe_attempt == 0:
                     time.sleep(self._config.process.retry_backoff_seconds)
                     continue
-                if discovery:
-                    return None
-                raise InferenceError(
-                    code="context-budget-probe-unavailable",
-                    retryable=True,
-                    attempts_exhausted=False,
-                    context=self._empty_failure_context(),
-                ) from exc
+                self._raise_counting_probe_transient(discovery, from_exc=exc)
             except httpx.TransportError as exc:
                 if probe_attempt == 0:
                     time.sleep(self._config.process.retry_backoff_seconds)
                     continue
-                if discovery:
-                    return None
-                raise InferenceError(
-                    code="context-budget-probe-unavailable",
-                    retryable=True,
-                    attempts_exhausted=False,
-                    context=self._empty_failure_context(),
-                ) from exc
+                self._raise_counting_probe_transient(discovery, from_exc=exc)
         return None
+
+    def _raise_counting_probe_transient(
+        self,
+        discovery: bool,
+        *,
+        from_exc: BaseException | None = None,
+    ) -> None:
+        if discovery:
+            raise ProcessingError(
+                code="token-counting-calibration-failed",
+                message="token-counting endpoint remained transiently unavailable",
+            ) from from_exc
+        raise InferenceError(
+            code="context-budget-probe-unavailable",
+            retryable=True,
+            attempts_exhausted=False,
+            context=self._empty_failure_context(),
+        ) from from_exc
 
     def _run_thinking_calibration_probes(
         self,
@@ -723,7 +722,12 @@ class LlamaCppVisionClient:
         response_format: dict[str, object],
     ) -> None:
         if contract.applied_template_probe_supported:
-            self._run_applied_template_probe(contract)
+            try:
+                self._run_applied_template_probe(contract)
+            except _ThinkingCandidateRejected as exc:
+                raise exc
+            except InferenceError:
+                raise
 
         raw_payload = self._build_chat_payload(
             prompt="Say hello in one short sentence.",
@@ -737,7 +741,7 @@ class LlamaCppVisionClient:
             allow_retry=False,
         )
         if raw_response.choices[0].message.reasoning_content:
-            raise ProcessingError(code="unsupported-thinking-control")
+            raise _ThinkingCandidateRejected()
 
         parsed_payload = self._build_chat_payload(
             prompt="Say hello in one short sentence.",
@@ -751,7 +755,7 @@ class LlamaCppVisionClient:
             allow_retry=False,
         )
         if parsed_response.choices[0].message.reasoning_content:
-            raise ProcessingError(code="unsupported-thinking-control")
+            raise _ThinkingCandidateRejected()
 
         production_payload = self._build_chat_payload(
             prompt=_SMOKE_PROMPT,
@@ -764,9 +768,12 @@ class LlamaCppVisionClient:
             serialize_wire_request(production_payload),
             allow_retry=False,
         )
-        self._enforce_non_thinking_response(production_response, contract)
-        content = production_response.choices[0].message.content or ""
-        VlmPageResponse.model_validate_json(content)
+        try:
+            self._enforce_non_thinking_response(production_response, contract)
+            content = production_response.choices[0].message.content or ""
+            VlmPageResponse.model_validate_json(content)
+        except (ProcessingError, ValidationError, IndexError) as exc:
+            raise _ThinkingCandidateRejected() from exc
 
     def _run_applied_template_probe(self, contract: ThinkingControlContract) -> None:
         payload = {
@@ -775,15 +782,37 @@ class LlamaCppVisionClient:
             "chat_template_kwargs": {"enable_thinking": contract.enable_thinking},
             "reasoning_format": contract.reasoning_format,
         }
-        response = self._client.post(
-            "/apply-template",
-            content=serialize_wire_request(payload),
-            headers={"Content-Type": "application/json"},
-        )
+        try:
+            response = self._client.post(
+                "/apply-template",
+                content=serialize_wire_request(payload),
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.TimeoutException as exc:
+            raise InferenceError(
+                code="thinking-smoke-unavailable",
+                retryable=True,
+                attempts_exhausted=False,
+                context=self._empty_failure_context(),
+            ) from exc
+        except httpx.TransportError as exc:
+            raise InferenceError(
+                code="thinking-smoke-unavailable",
+                retryable=True,
+                attempts_exhausted=False,
+                context=self._empty_failure_context(),
+            ) from exc
         if response.status_code == 404:
             return
+        if response.status_code in _TRANSIENT_STATUS_CODES or response.status_code >= 500:
+            raise InferenceError(
+                code="thinking-smoke-unavailable",
+                retryable=True,
+                attempts_exhausted=False,
+                context=self._empty_failure_context(),
+            )
         if response.status_code != 200:
-            raise ProcessingError(code="unsupported-thinking-control")
+            raise _ThinkingCandidateRejected()
 
     def _post_completion(
         self,
@@ -791,29 +820,53 @@ class LlamaCppVisionClient:
         *,
         allow_retry: bool,
     ) -> LlamaChatCompletionResponse:
-        try:
-            response, _, _ = self._complete_with_raw(wire_body)
-            return response
-        except _TransportFailure as exc:
-            if allow_retry and self._may_retry(
-                exc.error_code,
-                attempt_number=1,
-                max_attempts=2,
-                server_error_retries_used=0,
-            ):
-                time.sleep(self._config.process.retry_backoff_seconds)
+        max_attempts = 2 if allow_retry else 1
+        server_error_retries_used = 0
+
+        for attempt_number in range(1, max_attempts + 1):
+            try:
                 response, _, _ = self._complete_with_raw(wire_body)
                 return response
-            if exc.error_code == "transport-timeout":
-                raise InferenceError(
-                    code="thinking-smoke-unavailable",
-                    retryable=True,
-                    attempts_exhausted=False,
-                    context=self._empty_failure_context(),
+            except _TransportFailure as exc:
+                if (
+                    attempt_number < max_attempts
+                    and self._may_retry(
+                        exc.error_code,
+                        attempt_number=attempt_number,
+                        max_attempts=max_attempts,
+                        server_error_retries_used=server_error_retries_used,
+                    )
+                ):
+                    if exc.error_code == "http-server-error":
+                        server_error_retries_used += 1
+                    self._sleep_backoff(attempt_number, exc.retry_after_seconds)
+                    continue
+
+                if exc.error_code in {
+                    "transport-timeout",
+                    "transport-error",
+                    "response-body-truncated",
+                    "http-retryable",
+                    "http-server-error",
+                }:
+                    raise InferenceError(
+                        code="thinking-smoke-unavailable",
+                        retryable=True,
+                        attempts_exhausted=attempt_number >= max_attempts,
+                        context=self._empty_failure_context(),
+                    ) from exc
+
+                raise ProcessingError(
+                    code="thinking-control-contract-drift",
+                    message=exc.error_code,
                 ) from exc
-            raise ProcessingError(code="thinking-control-contract-drift") from exc
-        except _CompletionFailure as exc:
-            raise ProcessingError(code="thinking-control-contract-drift", message=exc.code) from exc
+            except _CompletionFailure as exc:
+                raise ProcessingError(
+                    code="thinking-control-contract-drift",
+                    message=exc.code,
+                ) from exc
+
+        raise ProcessingError(code="thinking-control-contract-drift")
 
     def _perform_http_request(self, wire_body: bytes) -> tuple[httpx.Response, bytes]:
         try:
@@ -972,11 +1025,17 @@ class LlamaCppVisionClient:
         self,
         response: LlamaChatCompletionResponse,
         contract: ThinkingControlContract,
+        *,
+        smoke: bool = False,
     ) -> None:
         if not response.choices:
+            if smoke:
+                raise ProcessingError(code="thinking-control-contract-drift")
             raise _CompletionFailure("empty-response", "missing choices")
         message = response.choices[0].message
         if message.reasoning_content:
+            if smoke:
+                raise ProcessingError(code="thinking-control-contract-drift")
             raise InferenceError(
                 code="unexpected-reasoning-content",
                 retryable=False,
@@ -1109,13 +1168,10 @@ class LlamaCppVisionClient:
         )
 
     def _llama_cpp_build_from_props(self, props: LlamaPropsResponse) -> str | None:
+        if props.build_info and props.build_info.strip():
+            return props.build_info.strip()
         if props.build_commit:
             return props.build_commit
-        if props.build_info is not None:
-            if props.build_info.commit:
-                return props.build_info.commit
-            if props.build_info.build_number is not None:
-                return str(props.build_info.build_number)
         if props.build_number is not None:
             return str(props.build_number)
         return None
@@ -1146,76 +1202,145 @@ class LlamaCppVisionClient:
 
     def _apply_template_tokenize_supported(
         self,
-        payload: dict[str, Any],
+        preflight: PreflightResult,
         *,
-        thinking_contract: ThinkingControlContract,
+        text_payload: dict[str, Any],
     ) -> bool:
-        """Return True only when /apply-template honors required non-thinking settings."""
-        if self._probe_apply_template_tokenize(payload, discovery=True) is None:
-            return False
-        return self._apply_template_equivalence_gate(payload, thinking_contract)
-
-    def _apply_template_equivalence_gate(
-        self,
-        payload: dict[str, Any],
-        thinking_contract: ThinkingControlContract,
-    ) -> bool:
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            return False
-
-        base_kwargs = payload.get("chat_template_kwargs")
-        if not isinstance(base_kwargs, dict):
-            base_kwargs = {}
-
-        non_thinking = self._post_apply_template(
-            messages=messages,
-            chat_template_kwargs={**base_kwargs, "enable_thinking": False},
-            reasoning_format="none",
-        )
-        if non_thinking is None:
-            return False
-
-        if thinking_contract.enable_thinking:
-            thinking = self._post_apply_template(
-                messages=messages,
-                chat_template_kwargs={**base_kwargs, "enable_thinking": True},
-                reasoning_format=thinking_contract.reasoning_format,
+        messages = self._apply_template_projection(text_payload)
+        caps = preflight.capabilities.chat_template_caps
+        if self._template_supports_thinking(caps):
+            false_prompt = self._request_apply_template(
+                {
+                    "messages": messages,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+                discovery=True,
+                extended=True,
             )
-            if thinking is None:
+            true_prompt = self._request_apply_template(
+                {
+                    "messages": messages,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                },
+                discovery=True,
+                extended=True,
+            )
+            if false_prompt is None or true_prompt is None:
                 return False
+            if false_prompt == true_prompt:
+                return False
+            count = self._request_tokenize(
+                false_prompt,
+                add_special=False,
+                parse_special=True,
+                discovery=True,
+            )
+            return count is not None
 
-        return True
+        prompt = self._request_apply_template(
+            {"messages": messages},
+            discovery=True,
+            extended=False,
+        )
+        if prompt is None:
+            return False
+        return self._request_tokenize(
+            prompt,
+            add_special=False,
+            parse_special=True,
+            discovery=True,
+        ) is not None
 
-    def _post_apply_template(
+    def _build_apply_template_contract(
         self,
+        preflight: PreflightResult,
+    ) -> ApplyTemplateTokenizeContract:
+        identity = preflight.identity
+        caps = preflight.capabilities.chat_template_caps
+        request_mode: Literal["messages-only", "messages-plus-chat-template-kwargs"]
+        if self._template_supports_thinking(caps):
+            request_mode = "messages-plus-chat-template-kwargs"
+        else:
+            request_mode = "messages-only"
+        return ApplyTemplateTokenizeContract(
+            mode="apply-template-tokenize",
+            apply_template_request_mode=request_mode,
+            input_projection="text-only",
+            image_token_policy="configured-reserve",
+            model_alias=identity.model_alias,
+            llama_cpp_build=identity.llama_cpp_build,
+            chat_template_sha256=identity.chat_template_sha256,
+        )
+
+    @staticmethod
+    def _template_supports_thinking(caps: dict[str, object]) -> bool:
+        return caps.get("reasoning") is True
+
+    def _apply_template_projection(
+        self,
+        text_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], text_payload["messages"])
+
+    def _request_apply_template(
+        self,
+        body: dict[str, Any],
         *,
-        messages: list[dict[str, Any]],
-        chat_template_kwargs: dict[str, Any],
-        reasoning_format: str,
+        discovery: bool,
+        extended: bool,
     ) -> str | None:
-        body = {
-            "model": self._config.extraction.model_alias,
-            "messages": messages,
-            "chat_template_kwargs": chat_template_kwargs,
-            "reasoning_format": reasoning_format,
-        }
+        full_body = {"model": self._config.extraction.model_alias, **body}
+        wire_body = serialize_wire_request(full_body)
+        if b"image_url" in wire_body or b"data:" in wire_body:
+            raise ProcessingError(
+                code="token-counting-calibration-failed",
+                message="apply-template projection must be text-only",
+            )
+
         try:
             response = self._client.post(
                 "/apply-template",
-                content=serialize_wire_request(body),
+                content=wire_body,
                 headers={"Content-Type": "application/json"},
             )
-        except httpx.TransportError:
-            return None
+        except httpx.TimeoutException as exc:
+            self._raise_counting_probe_transient(discovery, from_exc=exc)
+        except httpx.TransportError as exc:
+            self._raise_counting_probe_transient(discovery, from_exc=exc)
+
         if response.status_code == 404:
             return None
+        if response.status_code in _TRANSIENT_STATUS_CODES or response.status_code >= 500:
+            self._raise_counting_probe_transient(discovery)
+        if response.status_code == 400:
+            if discovery and extended:
+                return None
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message="apply-template rejected documented request",
+                )
+            raise ProcessingError(code="token-counting-contract-drift")
         if response.status_code != 200:
-            return None
+            if discovery and extended:
+                return None
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message=f"apply-template returned HTTP {response.status_code}",
+                )
+            raise ProcessingError(code="token-counting-contract-drift")
+
         try:
             parsed = json.loads(response.content)
         except json.JSONDecodeError:
-            return None
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message="apply-template returned malformed JSON",
+                ) from None
+            raise ProcessingError(code="token-counting-contract-drift") from None
+
         if isinstance(parsed, str):
             return parsed
         if isinstance(parsed, dict):
@@ -1223,7 +1348,75 @@ class LlamaCppVisionClient:
                 value = parsed.get(key)
                 if isinstance(value, str):
                     return value
-        return None
+        if discovery:
+            raise ProcessingError(
+                code="token-counting-calibration-failed",
+                message="apply-template returned malformed successful response",
+            )
+        raise ProcessingError(code="token-counting-contract-drift")
+
+    def _request_tokenize(
+        self,
+        prompt: str,
+        *,
+        add_special: bool,
+        parse_special: bool,
+        discovery: bool,
+    ) -> int | None:
+        body = {
+            "content": prompt,
+            "add_special": add_special,
+            "parse_special": parse_special,
+        }
+        try:
+            response = self._client.post(
+                "/tokenize",
+                content=serialize_wire_request(body),
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.TimeoutException as exc:
+            self._raise_counting_probe_transient(discovery, from_exc=exc)
+        except httpx.TransportError as exc:
+            self._raise_counting_probe_transient(discovery, from_exc=exc)
+
+        if response.status_code == 404:
+            return None
+        if response.status_code in _TRANSIENT_STATUS_CODES or response.status_code >= 500:
+            self._raise_counting_probe_transient(discovery)
+        if response.status_code == 400:
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message="tokenize rejected documented request",
+                )
+            raise ProcessingError(code="token-counting-contract-drift")
+        if response.status_code != 200:
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message=f"tokenize returned HTTP {response.status_code}",
+                )
+            raise ProcessingError(code="token-counting-contract-drift")
+
+        try:
+            parsed = json.loads(response.content)
+        except json.JSONDecodeError:
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message="tokenize returned malformed JSON",
+                ) from None
+            raise ProcessingError(code="token-counting-contract-drift") from None
+
+        tokens = parsed.get("tokens") if isinstance(parsed, dict) else None
+        if not isinstance(tokens, list):
+            if discovery:
+                raise ProcessingError(
+                    code="token-counting-calibration-failed",
+                    message="tokenize missing tokens array",
+                )
+            raise ProcessingError(code="token-counting-contract-drift")
+        return len(tokens)
 
     def _media_marker(self, props: LlamaPropsResponse) -> str | None:
         if props.media_marker is not None:
@@ -1247,6 +1440,10 @@ class LlamaCppVisionClient:
     ) -> bool:
         caps = capabilities.chat_template_caps
         return bool(caps.get("applied_template_probe") or caps.get("apply_template"))
+
+
+class _ThinkingCandidateRejected(Exception):
+    """Deterministic rejection of a reasoning-format calibration candidate."""
 
 
 class _ProbeTransient(Exception):
