@@ -153,20 +153,14 @@ def process_book(
         except ProcessingError as exc:
             if exc.code not in {"page-image-too-large", "page-render-failed"}:
                 raise
-            store.persist_failure(
-                page_number=page_index + 1,
+            from bookextract.failure_persistence import persist_page_preparation_failure
+
+            persist_page_preparation_failure(
+                store=store,
+                page_index=page_index,
                 context=context.model_dump(mode="json"),
-                page_input={
-                    "page_index": page_index,
-                    "stage": "rendering",
-                    "render_dpi": config.extraction.render_dpi,
-                    "render_annotations": config.extraction.render_annotations,
-                },
-                prompt=b"",
-                schema_ref={},
-                request_summary={},
-                error={"code": exc.code, "message": str(exc)},
-                attempts=None,
+                extraction_config=config.extraction,
+                error=exc,
             )
             raise
         except InferenceError as exc:

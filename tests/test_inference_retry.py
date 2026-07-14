@@ -114,3 +114,55 @@ def test_ordinary_5xx_exhausts_after_one_retry(tmp_path) -> None:
         )
     assert exc_info.value.code == "http-server-error"
     assert attempts["count"] == 2
+
+
+def test_unexpected_reasoning_records_attempt_with_context(tmp_path) -> None:
+    response_body = json.dumps(
+        {
+            "id": "1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "vision-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "content": '{"ok": true}',
+                        "reasoning_content": "hidden thought",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    ).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1/chat/completions":
+            return httpx.Response(404)
+        return httpx.Response(200, content=response_body)
+
+    client = _client_with_handler(handler)
+    image = tmp_path / "page.png"
+    image.write_bytes(b"png")
+    schema_ref = b'{"type":"object"}'
+    with pytest.raises(InferenceError) as exc_info:
+        client.generate_structured(
+            image_path=image,
+            page_image_sha256="deadbeef",
+            prompt="visible prompt",
+            response_model=_SmokeModel,
+            schema_ref=schema_ref,
+        )
+    err = exc_info.value
+    assert err.code == "unexpected-reasoning-content"
+    assert err.retryable is False
+    assert err.attempts is not None
+    assert len(err.attempts) == 1
+    attempt = err.attempts[0]
+    assert attempt.succeeded is False
+    assert attempt.status_code == 200
+    assert attempt.error_code == "unexpected-reasoning-content"
+    assert attempt.response_body == response_body
+    assert err.context.prompt == b"visible prompt"
+    assert err.context.page_image_sha256 == "deadbeef"
+    assert err.context.schema_ref == schema_ref

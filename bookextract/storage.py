@@ -271,42 +271,48 @@ class RunStore:
             shutil.rmtree(tmp_dir)
         tmp_dir.mkdir(parents=True)
 
-        file_hashes: dict[str, str] = {}
-        for rel_path, content in files.items():
-            validate_commit_relative_path(rel_path)
-            dest = tmp_dir / rel_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(content)
-            file_hashes[rel_path] = _sha256_bytes(content)
+        try:
+            head = self.read_head()
+            expected = head.committed_page_count + 1
+            if page_number != expected:
+                raise ProcessingError(
+                    code="invalid-run-layout",
+                    message=(
+                        f"non-contiguous commit: expected page "
+                        f"{expected:04d}, got {page_number:04d}"
+                    ),
+                )
 
-        manifest = CommitManifest(page_index=page_index, files=file_hashes)
-        manifest_bytes = (
-            json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=False)
-            + "\n"
-        ).encode("utf-8")
-        (tmp_dir / "manifest.json").write_bytes(manifest_bytes)
+            file_hashes: dict[str, str] = {}
+            for rel_path, content in files.items():
+                validate_commit_relative_path(rel_path)
+                dest = tmp_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(content)
+                file_hashes[rel_path] = _sha256_bytes(content)
 
-        validate_commit(tmp_dir)
+            manifest = CommitManifest(page_index=page_index, files=file_hashes)
+            manifest_bytes = (
+                json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=False)
+                + "\n"
+            ).encode("utf-8")
+            (tmp_dir / "manifest.json").write_bytes(manifest_bytes)
 
-        final_dir = self.commit_dir_for(page_number)
-        if final_dir.exists():
-            raise ProcessingError(
-                code="invalid-run-layout",
-                message=f"commit already exists: {final_dir.name}",
-            )
-        os.replace(tmp_dir, final_dir)
+            validate_commit(tmp_dir)
 
-        head = self.read_head()
-        if page_number != head.committed_page_count + 1:
-            raise ProcessingError(
-                code="invalid-run-layout",
-                message=(
-                    f"non-contiguous commit: expected page "
-                    f"{head.committed_page_count + 1:04d}, got {page_number:04d}"
-                ),
-            )
-        self.write_head(page_number)
-        return manifest
+            final_dir = self.commit_dir_for(page_number)
+            if final_dir.exists():
+                raise ProcessingError(
+                    code="invalid-run-layout",
+                    message=f"commit already exists: {final_dir.name}",
+                )
+            os.replace(tmp_dir, final_dir)
+            self.write_head(page_number)
+            return manifest
+        except BaseException:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+            raise
 
     def read_commit_file(self, page_number: int, rel_path: str) -> bytes:
         validate_commit_relative_path(rel_path)

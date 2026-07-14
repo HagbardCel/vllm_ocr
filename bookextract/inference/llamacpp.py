@@ -617,9 +617,7 @@ class LlamaCppVisionClient:
             if response.status_code in _TRANSIENT_STATUS_CODES:
                 raise _ProbeTransient(response.status_code)
             if response.status_code >= 500:
-                if discovery:
-                    return None
-                raise ProcessingError(code="token-counting-contract-drift")
+                raise _ProbeTransient(response.status_code)
             if response.status_code != 200:
                 if discovery:
                     return None
@@ -641,7 +639,7 @@ class LlamaCppVisionClient:
         *,
         discovery: bool,
     ) -> int | None:
-        messages = self._text_only_messages(payload)
+        messages = self._project_text_only_messages(payload)
         apply_body: dict[str, Any] = {"messages": messages}
         if contract.apply_template_request_mode == "messages-plus-chat-template-kwargs":
             apply_body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -661,20 +659,23 @@ class LlamaCppVisionClient:
             discovery=discovery,
         )
 
-    def _text_only_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def _project_text_only_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
         for message in cast(list[dict[str, Any]], payload.get("messages", [])):
             content = message.get("content")
             if isinstance(content, list):
-                text_parts = [
-                    str(part.get("text", ""))
+                text_only_parts = [
+                    part
                     for part in cast(list[dict[str, Any]], content)
-                    if part.get("type") == "text"
+                    if part.get("type") != "image_url"
                 ]
-                messages.append({"role": message["role"], "content": "\n".join(text_parts)})
+                messages.append({"role": message["role"], "content": text_only_parts})
             else:
                 messages.append({"role": message["role"], "content": content})
         return messages
+
+    def _text_only_messages(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._project_text_only_messages(payload)
 
     def _run_budget_probe(self, fn: Any, *, discovery: bool) -> int | None:
         for probe_attempt in range(2):
@@ -741,20 +742,6 @@ class LlamaCppVisionClient:
             allow_retry=False,
         )
         if raw_response.choices[0].message.reasoning_content:
-            raise _ThinkingCandidateRejected()
-
-        parsed_payload = self._build_chat_payload(
-            prompt="Say hello in one short sentence.",
-            image_path=None,
-            response_format=None,
-            thinking_contract=contract,
-            include_image=False,
-        )
-        parsed_response = self._post_completion(
-            serialize_wire_request(parsed_payload),
-            allow_retry=False,
-        )
-        if parsed_response.choices[0].message.reasoning_content:
             raise _ThinkingCandidateRejected()
 
         production_payload = self._build_chat_payload(
@@ -1036,11 +1023,9 @@ class LlamaCppVisionClient:
         if message.reasoning_content:
             if smoke:
                 raise ProcessingError(code="thinking-control-contract-drift")
-            raise InferenceError(
-                code="unexpected-reasoning-content",
-                retryable=False,
-                attempts_exhausted=False,
-                context=self._empty_failure_context(),
+            raise _CompletionFailure(
+                "unexpected-reasoning-content",
+                "completion contained reasoning content",
             )
         if contract.reasoning_content_expected and not message.reasoning_content:
             raise ProcessingError(code="thinking-control-contract-drift")
@@ -1280,7 +1265,7 @@ class LlamaCppVisionClient:
         self,
         text_payload: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        return cast(list[dict[str, Any]], text_payload["messages"])
+        return self._project_text_only_messages(text_payload)
 
     def _request_apply_template(
         self,
@@ -1289,8 +1274,7 @@ class LlamaCppVisionClient:
         discovery: bool,
         extended: bool,
     ) -> str | None:
-        full_body = {"model": self._config.extraction.model_alias, **body}
-        wire_body = serialize_wire_request(full_body)
+        wire_body = serialize_wire_request(body)
         if b"image_url" in wire_body or b"data:" in wire_body:
             raise ProcessingError(
                 code="token-counting-calibration-failed",
@@ -1341,13 +1325,10 @@ class LlamaCppVisionClient:
                 ) from None
             raise ProcessingError(code="token-counting-contract-drift") from None
 
-        if isinstance(parsed, str):
-            return parsed
         if isinstance(parsed, dict):
-            for key in ("prompt", "text", "template"):
-                value = parsed.get(key)
-                if isinstance(value, str):
-                    return value
+            prompt = parsed.get("prompt")
+            if isinstance(prompt, str) and prompt:
+                return prompt
         if discovery:
             raise ProcessingError(
                 code="token-counting-calibration-failed",

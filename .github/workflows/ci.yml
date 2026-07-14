@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - implement/bookextract-v0.1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.6.14"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff
+        run: uv run ruff check bookextract tests
+
+      - name: Mypy
+        run: uv run mypy bookextract
+
+      - name: Pytest
+        run: uv run pytest

@@ -95,7 +95,13 @@ def test_partial_run_does_not_validate_complete_book(
     multi_page_pdf: Path,
     processing_config: ProcessingConfig,
 ) -> None:
-    from bookextract.config import RenderContract, RunRecord, SourceLocation, write_json_atomic
+    from bookextract.config import (
+        ProcessOptions,
+        RenderContract,
+        RunRecord,
+        SourceLocation,
+        write_json_atomic,
+    )
     from bookextract.state import load_or_initialize_state
 
     run_dir = tmp_path / "partial-run"
@@ -107,6 +113,7 @@ def test_partial_run_does_not_validate_complete_book(
             source={"sha256": "0" * 64, "size": 1, "page_count": 3},
             extraction=processing_config.extraction,
             fingerprint_policy={"require_complete_fingerprint": False},
+            process_options=ProcessOptions(),
             render_contract=RenderContract(pymupdf_version="test"),
             prompt_sha256="0" * 64,
             wire_schema_sha256="0" * 64,

@@ -71,6 +71,7 @@ class RunRecord(DomainModel):
     source: dict[str, object]
     extraction: ExtractionConfig
     fingerprint_policy: InferenceFingerprintConfig
+    process_options: ProcessOptions
     render_contract: RenderContract
     prompt_sha256: str
     wire_schema_sha256: str
@@ -104,6 +105,14 @@ def load_processing_config(path: Path) -> ProcessingConfig:
 def load_run_record(run_dir: Path) -> RunRecord:
     return RunRecord.model_validate_json(
         (run_dir / "run.json").read_text(encoding="utf-8")
+    )
+
+
+def processing_config_from_run_record(record: RunRecord) -> ProcessingConfig:
+    return ProcessingConfig(
+        extraction=record.extraction,
+        fingerprint=record.fingerprint_policy,
+        process=record.process_options,
     )
 
 

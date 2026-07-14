@@ -81,8 +81,44 @@ def test_run_store_rejects_non_contiguous_commit(run_dir: Path) -> None:
         "provenance.json": b"{}\n",
     }
     store.write_commit(1, files)
+    tmp_dir = store.commit_tmp_dir_for(3)
+    final_dir = store.commit_dir_for(3)
     with pytest.raises(ProcessingError, match="non-contiguous"):
         store.write_commit(3, files)
+    assert not tmp_dir.exists()
+    assert not final_dir.exists()
+    assert store.read_head().committed_page_count == 1
+
+
+def test_write_commit_orphan_recovered_after_head_write_failure(run_dir: Path, monkeypatch) -> None:
+    store = RunStore(run_dir)
+    files = {
+        "page-assessment.json": b"{}\n",
+        "page-context.json": b"{}\n",
+        "interpretation.json": b"{}\n",
+        "provenance.json": b"{}\n",
+    }
+
+    original_write_head = store.write_head
+
+    def failing_write_head(page_number: int) -> None:
+        if page_number == 1:
+            raise OSError("simulated head write failure")
+        original_write_head(page_number)
+
+    monkeypatch.setattr(store, "write_head", failing_write_head)
+    with pytest.raises(OSError, match="simulated head write failure"):
+        store.write_commit(1, files)
+
+    final_dir = store.commit_dir_for(1)
+    assert final_dir.exists()
+    assert store.read_head().committed_page_count == 0
+
+    monkeypatch.setattr(store, "write_head", original_write_head)
+    state, committed = store.recover()
+    assert committed == 0
+    assert not final_dir.exists()
+    assert state.processed_page_count == 0
 
 
 def test_inference_environment_write_once(run_dir: Path) -> None:

@@ -2,37 +2,25 @@
 
 from __future__ import annotations
 
-import hashlib
+from collections.abc import Callable
 from pathlib import Path
 
 from bookextract.config import InferenceLocation
 from bookextract.errors import ProcessingError
+from bookextract.failure_persistence import persist_page_preparation_failure
+from bookextract.fingerprints import fingerprint_file
 from bookextract.inference.llamacpp import LlamaCppVisionClient
 from bookextract.models import (
     FileFingerprint,
     InferenceEnvironment,
+    PageContext,
+    RenderedPage,
     ServerInferenceIdentity,
     ThinkingControlContract,
     TokenCountingContract,
 )
 from bookextract.schema import build_wire_response_format
 from bookextract.storage import RunStore
-
-
-def fingerprint_file(path: Path) -> FileFingerprint:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-            size += len(chunk)
-    stat = path.stat()
-    return FileFingerprint(
-        path=str(path.resolve()),
-        size=size,
-        mtime_ns=stat.st_mtime_ns,
-        sha256=digest.hexdigest(),
-    )
 
 
 def _assert_server_identity(
@@ -100,8 +88,9 @@ def prepare_inference_environment(
     *,
     store: RunStore,
     client: LlamaCppVisionClient,
-    calibration_image: Path,
+    calibration_context: PageContext,
     calibration_prompt: str,
+    render_calibration_page: Callable[[], RenderedPage] | None,
 ) -> InferenceEnvironment:
     """Run preflight, calibrate or verify contracts, smoke test, and bind the client."""
     preflight = client.preflight()
@@ -120,6 +109,30 @@ def prepare_inference_environment(
 
     if existing is None:
         thinking_contract = client.calibrate_thinking_control(preflight)
+
+        calibration_image: Path | None = None
+        if render_calibration_page is not None:
+            try:
+                calibration_page = render_calibration_page()
+            except ProcessingError as exc:
+                if exc.code not in {"page-image-too-large", "page-render-failed"}:
+                    raise
+                persist_page_preparation_failure(
+                    store=store,
+                    page_index=0,
+                    context=calibration_context.model_dump(mode="json"),
+                    extraction_config=client._config.extraction,
+                    error=exc,
+                )
+                raise
+            calibration_image = calibration_page.image_path
+
+        if calibration_image is None:
+            raise ProcessingError(
+                code="inference-environment-drift",
+                message="calibration render callback required for first environment",
+            )
+
         token_contract = client.discover_token_counting_contract(
             preflight,
             prompt=calibration_prompt,

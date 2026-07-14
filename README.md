@@ -18,7 +18,7 @@ uv sync --extra dev
 ## Usage
 
 ```bash
-bookextract init --pdf book.pdf --run runs/mybook --config config.toml
+bookextract init book.pdf --run runs/mybook --config config.toml --model /path/to/model.gguf
 bookextract process --run runs/mybook
 bookextract render-markdown --run runs/mybook
 bookextract render-epub --run runs/mybook

@@ -7,7 +7,7 @@ from pathlib import Path
 import fitz
 import pytest
 
-from bookextract.config import ExtractionConfig, ProcessingConfig
+from bookextract.config import ExtractionConfig, ProcessingConfig, ProcessOptions
 from bookextract.models import (
     ApplyTemplateTokenizeContract,
     InferenceEnvironment,
@@ -123,6 +123,7 @@ def run_dir(tmp_path: Path, minimal_pdf: Path) -> Path:
             source={"sha256": "0" * 64, "size": 1},
             extraction=ExtractionConfig(model_alias="test-model", prompt_version="v1"),
             fingerprint_policy={"require_complete_fingerprint": False},
+            process_options=ProcessOptions(),
             render_contract=RenderContract(pymupdf_version=fitz.VersionBind),
             prompt_sha256="0" * 64,
             wire_schema_sha256="0" * 64,
