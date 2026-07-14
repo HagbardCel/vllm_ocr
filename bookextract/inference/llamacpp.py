@@ -45,6 +45,27 @@ _SMOKE_PROMPT = "Reply with the JSON schema only. No reasoning."
 _ESTIMATE_CHARS_PER_TOKEN = 4
 
 
+def _has_valid_text_only_messages(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+
+    for message in value:
+        if not isinstance(message, dict):
+            return False
+
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            if not isinstance(part, dict):
+                return False
+            if part.get("type") == "image_url":
+                return False
+
+    return True
+
+
 class LlamaWireModel(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
@@ -1305,12 +1326,14 @@ class LlamaCppVisionClient:
         discovery: bool,
         extended: bool,
     ) -> str | None:
-        wire_body = serialize_wire_request(body)
-        if b"image_url" in wire_body or b"data:" in wire_body:
+        messages = body.get("messages")
+        if not _has_valid_text_only_messages(messages):
             raise ProcessingError(
                 code="token-counting-calibration-failed",
                 message="apply-template projection must be text-only",
             )
+
+        wire_body = serialize_wire_request(body)
 
         try:
             response = self._client.post(

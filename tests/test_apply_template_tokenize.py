@@ -81,8 +81,12 @@ def test_discover_apply_template_messages_only(tmp_path: Path) -> None:
         calls.append((request.url.path, body))
         if request.url.path == "/apply-template":
             assert "model" not in body
-            assert "image_url" not in request.content.decode()
-            assert "data:" not in request.content.decode()
+            assert all(
+                part.get("type") != "image_url"
+                for message in body["messages"]
+                if isinstance(message.get("content"), list)
+                for part in message["content"]
+            )
             assert body == {
                 "messages": [
                     {
@@ -116,6 +120,87 @@ def test_discover_apply_template_messages_only(tmp_path: Path) -> None:
     assert contract.input_projection == "text-only"
     assert calls[0][0] == "/apply-template"
     assert calls[1][0] == "/tokenize"
+
+
+_BOOK_TEXT_WITH_LITERALS = (
+    "Data: A History discusses the literal API field name image_url."
+)
+
+
+def test_apply_template_allows_book_text_with_data_and_image_url_literals(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    apply_template_body: dict[str, object] | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal apply_template_body
+        calls.append(request.url.path)
+        if request.url.path.endswith("input_tokens"):
+            return httpx.Response(404)
+        body = json.loads(request.content)
+        if request.url.path == "/apply-template":
+            apply_template_body = body
+            return httpx.Response(
+                200, content=json.dumps({"prompt": "prompt-text"}).encode()
+            )
+        if request.url.path == "/tokenize":
+            return httpx.Response(200, content=json.dumps({"tokens": [1, 2, 3]}).encode())
+        return httpx.Response(404)
+
+    client = _client(httpx.MockTransport(handler))
+    contract = client.discover_token_counting_contract(
+        _preflight(reasoning=False),
+        prompt=_BOOK_TEXT_WITH_LITERALS,
+        image_path=_calibration_image(tmp_path),
+        response_format={"type": "json_schema"},
+        thinking_contract=_thinking_contract(),
+    )
+    assert isinstance(contract, ApplyTemplateTokenizeContract)
+    assert any(path.endswith("input_tokens") for path in calls)
+    assert "/apply-template" in calls
+    assert "/tokenize" in calls
+    assert apply_template_body == {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": _BOOK_TEXT_WITH_LITERALS}],
+            }
+        ]
+    }
+
+
+def test_apply_template_rejects_image_url_content_part() -> None:
+    apply_template_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal apply_template_calls
+        if request.url.path == "/apply-template":
+            apply_template_calls += 1
+        return httpx.Response(404)
+
+    client = _client(httpx.MockTransport(handler))
+    with pytest.raises(ProcessingError) as exc_info:
+        client._request_apply_template(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "hello"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,AA=="},
+                            },
+                        ],
+                    }
+                ]
+            },
+            discovery=True,
+            extended=False,
+        )
+    assert exc_info.value.code == "token-counting-calibration-failed"
+    assert apply_template_calls == 0
 
 
 def test_discover_apply_template_extended_mode(tmp_path: Path) -> None:
