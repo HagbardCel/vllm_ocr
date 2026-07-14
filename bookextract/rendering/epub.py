@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -12,6 +13,12 @@ from bookextract.errors import ExternalToolError, ProcessingError
 from bookextract.models import PublicationDocument, PublicationMetadata
 
 REQUIRED_BASE_DEFAULT_KEYS = frozenset({"from", "to", "split-level"})
+
+
+def epubcheck_argv(config: EpubRenderConfig, epub_path: Path) -> list[str]:
+    if config.epubcheck_jar_path is not None:
+        return ["java", "-jar", str(config.epubcheck_jar_path.resolve()), str(epub_path.resolve())]
+    return [config.epubcheck_executable, str(epub_path.resolve())]
 
 
 class EpubRenderer:
@@ -37,6 +44,26 @@ class EpubRenderer:
         if set(base.keys()) != REQUIRED_BASE_DEFAULT_KEYS:
             raise ProcessingError(code="unsupported-pandoc-defaults")
         return cast(dict[str, object], base)
+
+    def run_epubcheck(self, epub_path: Path) -> None:
+        command = epubcheck_argv(self._config, epub_path)
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise ExternalToolError(
+                code="epubcheck-failed",
+                message=exc.stderr or exc.stdout or str(exc),
+            ) from exc
+        except FileNotFoundError as exc:
+            raise ExternalToolError(
+                code="epubcheck-failed",
+                message=f"EPUBCheck executable not found: {command[0]}",
+            ) from exc
 
     def render(
         self,
@@ -78,11 +105,7 @@ class EpubRenderer:
         assets_dest = build_dir / "assets"
         if assets_src.is_dir():
             if assets_dest.exists():
-                import shutil
-
                 shutil.rmtree(assets_dest)
-            import shutil
-
             shutil.copytree(assets_src, assets_dest)
 
         command = [
