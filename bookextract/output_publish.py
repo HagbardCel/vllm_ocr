@@ -461,7 +461,14 @@ def _recover_with_marker(
                     )
                     return
                 _quarantine_path(store, destination, f"{command}-destination-invalid")
-                _remove_transaction(store, command)
+                _finish_recovery(
+                    store,
+                    command,
+                    destination=destination,
+                    candidate_path=None,
+                    previous_path=None,
+                    work_path=work_path,
+                )
                 return
             previous_name = _previous_name(command)
             shutil.move(str(destination), str(previous_path))
@@ -509,7 +516,14 @@ def _recover_with_marker(
                 )
                 return
             _quarantine_path(store, destination, f"{command}-destination-stale")
-            _remove_transaction(store, command)
+            _finish_recovery(
+                store,
+                command,
+                destination=destination,
+                candidate_path=None,
+                previous_path=None,
+                work_path=work_path,
+            )
             return
         if not dest_exists and cand_exists and prev_exists:
             if not candidate_valid:
@@ -556,7 +570,14 @@ def _recover_with_marker(
         if not dest_exists and cand_exists and not prev_exists:
             if not candidate_valid:
                 _quarantine_path(store, candidate_path, f"{command}-candidate-stale")
-                _remove_transaction(store, command)
+                _finish_recovery(
+                    store,
+                    command,
+                    destination=destination,
+                    candidate_path=None,
+                    previous_path=None,
+                    work_path=work_path,
+                )
                 return
             _publish_candidate(
                 store,
@@ -636,7 +657,16 @@ def _recover_with_marker(
                     work_path=work_path,
                 )
                 return
-            _remove_transaction(store, command)
+            _quarantine_path(store, destination, f"{command}-destination-stale")
+            _quarantine_path(store, previous_path, f"{command}-previous-invalid")
+            _finish_recovery(
+                store,
+                command,
+                destination=destination,
+                candidate_path=None,
+                previous_path=None,
+                work_path=work_path,
+            )
             return
         if not dest_exists and not cand_exists and prev_exists:
             _try_restore_valid_previous(
