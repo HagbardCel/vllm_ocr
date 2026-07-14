@@ -226,9 +226,13 @@ class RunStore:
         )
 
     def load_inference_location(self) -> InferenceLocation:
-        return InferenceLocation.model_validate_json(
-            self._path("inference-location.json").read_text(encoding="utf-8")
-        )
+        path = self._path("inference-location.json")
+        if not path.is_file():
+            raise ProcessingError(
+                code="invalid-run-layout",
+                message="missing inference-location.json",
+            )
+        return InferenceLocation.model_validate_json(path.read_text(encoding="utf-8"))
 
     def write_inference_location(self, location: InferenceLocation) -> None:
         write_json_atomic(

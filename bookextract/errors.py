@@ -91,7 +91,7 @@ def exit_code_for_error(exc: BaseException) -> int:
     if isinstance(exc, ExternalToolError):
         return EXIT_EXTERNAL
     if isinstance(exc, ProcessingError):
-        if exc.code == "invalid-artifact-path":
+        if exc.code in {"invalid-artifact-path", "invalid-source-pdf"}:
             return EXIT_PDF_STORAGE
         return EXIT_RUN_STATE
     return EXIT_UNEXPECTED

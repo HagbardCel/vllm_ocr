@@ -62,13 +62,41 @@ def _wire_schema_sha256() -> str:
     ).hexdigest()
 
 
+_PYMUPDF_OPEN_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    RuntimeError,
+    fitz.FileDataError,
+    fitz.EmptyFileError,
+)
+
+
+def _validate_source_pdf(path: Path) -> tuple[str, int, int]:
+    try:
+        sha256, size_bytes = _hash_file(path)
+        with fitz.open(path) as document:
+            page_count = len(document)
+    except _PYMUPDF_OPEN_ERRORS as exc:
+        raise ProcessingError(
+            code="invalid-source-pdf",
+            message=f"cannot open source PDF: {path}",
+        ) from exc
+
+    if page_count < 1:
+        raise ProcessingError(
+            code="invalid-source-pdf",
+            message="source PDF contains no pages",
+        )
+
+    return sha256, size_bytes, page_count
+
+
 def _validate_init_inputs(
     *,
     pdf_path: Path,
     config_path: Path,
     model_path: Path,
     projector_path: Path | None,
-) -> ProcessingConfig:
+) -> tuple[ProcessingConfig, str, int, int]:
     if not pdf_path.is_file():
         raise FileNotFoundError(f"source PDF not found: {pdf_path}")
     config = load_processing_config(config_path)
@@ -76,7 +104,8 @@ def _validate_init_inputs(
         raise FileNotFoundError(f"model file not found: {model_path}")
     if projector_path is not None and not projector_path.is_file():
         raise FileNotFoundError(f"projector file not found: {projector_path}")
-    return config
+    sha256, size_bytes, page_count = _validate_source_pdf(pdf_path)
+    return config, sha256, size_bytes, page_count
 
 
 def _compute_relocation(
@@ -123,6 +152,13 @@ def _compute_relocation(
             message="inference environment fingerprints are incomplete",
         )
 
+    stored_projector = existing.projector_file
+    if stored_projector is not None and not stored_projector.sha256:
+        raise ProcessingError(
+            code="inference-relocation-rejected",
+            message="incomplete projector fingerprint",
+        )
+
     model_file = existing.model_file
     new_model_fp = fingerprint_file(resulting_model)
     if new_model_fp.sha256 != model_file.sha256:
@@ -131,7 +167,6 @@ def _compute_relocation(
             message="model fingerprint mismatch",
         )
 
-    stored_projector = existing.projector_file
     if stored_projector is not None and stored_projector.sha256:
         if resulting_projector is None:
             raise ProcessingError(
@@ -164,7 +199,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     projector_path = Path(args.projector).resolve() if args.projector else None
 
     try:
-        config = _validate_init_inputs(
+        config, sha256, size_bytes, page_count = _validate_init_inputs(
             pdf_path=pdf_path,
             config_path=config_path,
             model_path=model_path,
@@ -194,10 +229,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         run_dir.mkdir(parents=True, exist_ok=True)
         store = RunStore(run_dir)
         store.ensure_layout()
-
-        sha256, size_bytes = _hash_file(pdf_path)
-        with fitz.open(pdf_path) as doc:
-            page_count = len(doc)
 
         run_record = RunRecord(
             source={"sha256": sha256, "size_bytes": size_bytes, "page_count": page_count},
