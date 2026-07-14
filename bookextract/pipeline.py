@@ -133,22 +133,34 @@ def process_book(
         end_index = min(end_index, start_index + max_pages)
 
     for page_index in range(start_index, end_index):
-        rendered = source.render_page(
-            page_index, dpi=config.extraction.render_dpi
-        )
-        page_input = PageInput(
-            page_index=page_index,
-            rendered=rendered,
-        )
         context = build_page_context(state)
+        page_input: PageInput | None = None
+        is_final_page = page_index == end_index - 1
 
         try:
+            rendered = source.render_page(
+                page_index, dpi=config.extraction.render_dpi
+            )
+            page_input = PageInput(
+                page_index=page_index,
+                rendered=rendered,
+            )
             result = interpreter.interpret(page_input=page_input, context=context)
         except InferenceError as exc:
+            planned_input = {
+                "page_index": page_index,
+                "stage": "rendering" if page_input is None else "interpretation",
+                "render_dpi": config.extraction.render_dpi,
+                "render_annotations": config.extraction.render_annotations,
+            }
             store.persist_failure(
                 page_number=page_index + 1,
                 context=context.model_dump(mode="json"),
-                page_input=page_input.model_dump(mode="json"),
+                page_input=(
+                    page_input.model_dump(mode="json")
+                    if page_input is not None
+                    else planned_input
+                ),
                 prompt=exc.context.prompt,
                 schema_ref={"wire_schema_version": config.extraction.wire_schema_version},
                 request_summary=json.loads(exc.context.request_summary.decode("utf-8")),
@@ -196,6 +208,26 @@ def process_book(
         interpretation, figure_files = _collect_figure_assets(interpretation, rendered)
         assessment = assessment.model_copy(update={"interpretation": interpretation})
 
+        if is_final_page:
+            prospective_state = apply_assessment(state, assessment)
+            prospective_document = BookDocument(pages=[*document.pages, assessment])
+            try:
+                validate_complete_book(
+                    document=prospective_document,
+                    state=prospective_state,
+                )
+            except StructuralError as exc:
+                store.persist_failure(
+                    page_number=page_index + 1,
+                    context=context.model_dump(mode="json"),
+                    page_input=page_input.model_dump(mode="json"),
+                    prompt=b"",
+                    schema_ref={"wire_schema_version": config.extraction.wire_schema_version},
+                    request_summary={},
+                    error={"code": exc.code, "message": str(exc)},
+                )
+                raise
+
         state = apply_assessment(state, assessment)
         document.pages.append(assessment)
 
@@ -215,5 +247,4 @@ def process_book(
         store.write_commit(page_number, commit_files)
         store.write_state_cache(state, page_number)
 
-    validate_complete_book(document=document, state=state)
     return ProcessResult(document=document, state=state)

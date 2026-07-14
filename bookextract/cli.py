@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from bookextract.pipeline import process_book
 from bookextract.rendering.epub import EpubRenderer
 from bookextract.rendering.markdown import MarkdownRenderer
 from bookextract.rendering.publication import build_publication_document
+from bookextract.run_lock import acquire_run_lock
 from bookextract.storage import RunStore
 
 
@@ -47,11 +49,12 @@ def _hash_file(path: Path) -> tuple[str, int]:
 
 
 def _wire_schema_sha256() -> str:
-    package_root = Path(__file__).resolve().parents[1]
-    schema_path = package_root / "schemas" / "vlm-page-response-v1.json"
-    if schema_path.is_file():
-        return _hash_file(schema_path)[0]
-    return hashlib.sha256(b"vlm-page-response-v1").hexdigest()
+    from bookextract.schema import load_wire_schema
+
+    schema = load_wire_schema()
+    return hashlib.sha256(
+        json.dumps(schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -65,39 +68,50 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     config = load_processing_config(config_path)
     run_dir.mkdir(parents=True, exist_ok=True)
-    store = RunStore(run_dir)
-    store.ensure_layout()
 
-    sha256, size_bytes = _hash_file(pdf_path)
-    with fitz.open(pdf_path) as doc:
-        page_count = len(doc)
+    with acquire_run_lock(run_dir):
+        store = RunStore(run_dir)
+        if (
+            (run_dir / "run.json").exists()
+            or (run_dir / "head.json").exists()
+            or (run_dir / "commits").exists()
+            or (run_dir / "inference-environment.json").exists()
+        ):
+            print("run-already-initialized", file=sys.stderr)
+            return 13
 
-    run_record = RunRecord(
-        source={"sha256": sha256, "size_bytes": size_bytes, "page_count": page_count},
-        extraction=config.extraction,
-        fingerprint_policy=config.fingerprint,
-        render_contract=RenderContract(pymupdf_version=fitz.__version__),
-        prompt_sha256=prompt_sha256(),
-        wire_schema_sha256=_wire_schema_sha256(),
-        created_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-    )
-    write_json_atomic(run_dir / "run.json", run_record.model_dump(mode="json"))
+        store.ensure_layout()
 
-    store.write_source_location(
-        SourceLocation(pdf_path=pdf_path),
-    )
-    if args.model:
-        store.write_inference_location(
-            InferenceLocation(
-                model_file_path=Path(args.model).resolve(),
-                projector_file_path=Path(args.projector).resolve() if args.projector else None,
-            )
+        sha256, size_bytes = _hash_file(pdf_path)
+        with fitz.open(pdf_path) as doc:
+            page_count = len(doc)
+
+        run_record = RunRecord(
+            source={"sha256": sha256, "size_bytes": size_bytes, "page_count": page_count},
+            extraction=config.extraction,
+            fingerprint_policy=config.fingerprint,
+            render_contract=RenderContract(pymupdf_version=fitz.__version__),
+            prompt_sha256=prompt_sha256(),
+            wire_schema_sha256=_wire_schema_sha256(),
+            created_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         )
-    elif args.projector:
-        print("--projector requires --model", file=sys.stderr)
-        return 2
+        write_json_atomic(run_dir / "run.json", run_record.model_dump(mode="json"))
 
-    store.write_head(0)
+        store.write_source_location(
+            SourceLocation(pdf_path=pdf_path),
+        )
+        if args.model:
+            store.write_inference_location(
+                InferenceLocation(
+                    model_file_path=Path(args.model).resolve(),
+                    projector_file_path=Path(args.projector).resolve() if args.projector else None,
+                )
+            )
+        elif args.projector:
+            print("--projector requires --model", file=sys.stderr)
+            return 2
+
+        store.write_head(0)
     print(f"initialized run at {run_dir}")
     return 0
 
@@ -129,100 +143,114 @@ def _process_kwargs(args: argparse.Namespace) -> dict[str, int | None]:
 
 def cmd_process(args: argparse.Namespace) -> int:
     run_dir = Path(args.run).resolve()
-    store = RunStore(run_dir)
     config = _resolve_config(args, run_dir)
 
-    if args.model or args.projector:
-        location = store.load_inference_location()
-        if args.model:
-            location = location.model_copy(
-                update={"model_file_path": Path(args.model).resolve()}
-            )
-        if args.projector:
-            location = location.model_copy(
-                update={"projector_file_path": Path(args.projector).resolve()}
-            )
-        store.write_inference_location(location)
-
-    source_loc = store.load_source_location()
-    pdf_source = PdfPageSource(
-        source_loc.pdf_path,
-        store._path("pages"),
-        dpi=config.extraction.render_dpi,
-    )
     try:
-        if args.interpreter == "vlm":
-            from bookextract.context import build_page_context
-            from bookextract.inference.bootstrap import prepare_inference_environment
-            from bookextract.inference.llamacpp import LlamaCppVisionClient
-            from bookextract.interpretation.prompts import PagePromptBuilder
-            from bookextract.interpretation.vlm import LlamaCppStructuredClient, VlmPageInterpreter
-            from bookextract.state import load_or_initialize_state
+        with acquire_run_lock(run_dir):
+            store = RunStore(run_dir)
+            store.recover()
 
-            store.load_inference_location()
-            calibration_page = pdf_source.render_page(0, dpi=config.extraction.render_dpi)
-            state, _ = load_or_initialize_state(store)
-            calibration_prompt = PagePromptBuilder().build(build_page_context(state))
+            if args.model or args.projector:
+                location = store.load_inference_location()
+                if args.model:
+                    location = location.model_copy(
+                        update={"model_file_path": Path(args.model).resolve()}
+                    )
+                if args.projector:
+                    location = location.model_copy(
+                        update={"projector_file_path": Path(args.projector).resolve()}
+                    )
+                store.write_inference_location(location)
 
-            with LlamaCppVisionClient(config) as llama_client:
-                prepare_inference_environment(
-                    store=store,
-                    client=llama_client,
-                    calibration_image=calibration_page.image_path,
-                    calibration_prompt=calibration_prompt,
-                )
-                interpreter = VlmPageInterpreter(
-                    LlamaCppStructuredClient(llama_client),
-                    model=config.extraction.model_alias,
-                    prompt_version=config.extraction.prompt_version,
-                )
-                process_book(
-                    source=pdf_source,
-                    interpreter=interpreter,
-                    store=store,
-                    config=config,
-                    **_process_kwargs(args),
-                )
-        else:
-            from bookextract.artifacts import InterpretationResult
-            from bookextract.models import (
-                ExtractedMetadata,
-                InterpretationProvenance,
-                PageContext,
-                PageInput,
-                PageInterpretation,
-                PageType,
+            source_loc = store.load_source_location()
+            pdf_source = PdfPageSource(
+                source_loc.pdf_path,
+                store._path("pages"),
+                dpi=config.extraction.render_dpi,
             )
+            try:
+                if args.interpreter == "vlm":
+                    from bookextract.context import build_page_context
+                    from bookextract.inference.bootstrap import prepare_inference_environment
+                    from bookextract.inference.llamacpp import LlamaCppVisionClient
+                    from bookextract.interpretation.prompts import PagePromptBuilder
+                    from bookextract.interpretation.vlm import (
+                        LlamaCppStructuredClient,
+                        VlmPageInterpreter,
+                    )
+                    from bookextract.state import load_or_initialize_state
 
-            class NoopInterpreter:
-                def interpret(
-                    self, *, page_input: PageInput, context: PageContext
-                ) -> InterpretationResult:
-                    del page_input, context
-                    return InterpretationResult(
-                        interpretation=PageInterpretation(
-                            page_type=PageType.BLANK,
-                            metadata=ExtractedMetadata(),
-                        ),
-                        provenance=InterpretationProvenance(
-                            prompt_version=config.extraction.prompt_version,
-                            model=config.extraction.model_alias,
-                            backend="noop",
-                        ),
+                    store.load_inference_location()
+                    calibration_page = pdf_source.render_page(
+                        0, dpi=config.extraction.render_dpi
+                    )
+                    state, _ = load_or_initialize_state(store)
+                    calibration_prompt = PagePromptBuilder().build(
+                        build_page_context(state)
                     )
 
-            process_book(
-                source=pdf_source,
-                interpreter=NoopInterpreter(),
-                store=store,
-                config=config,
-                **_process_kwargs(args),
-            )
+                    with LlamaCppVisionClient(config) as llama_client:
+                        prepare_inference_environment(
+                            store=store,
+                            client=llama_client,
+                            calibration_image=calibration_page.image_path,
+                            calibration_prompt=calibration_prompt,
+                        )
+                        interpreter = VlmPageInterpreter(
+                            LlamaCppStructuredClient(llama_client),
+                            model=config.extraction.model_alias,
+                            prompt_version=config.extraction.prompt_version,
+                        )
+                        process_book(
+                            source=pdf_source,
+                            interpreter=interpreter,
+                            store=store,
+                            config=config,
+                            **_process_kwargs(args),
+                        )
+                else:
+                    from bookextract.artifacts import InterpretationResult
+                    from bookextract.models import (
+                        ExtractedMetadata,
+                        InterpretationProvenance,
+                        PageContext,
+                        PageInput,
+                        PageInterpretation,
+                        PageType,
+                    )
+
+                    class NoopInterpreter:
+                        def interpret(
+                            self, *, page_input: PageInput, context: PageContext
+                        ) -> InterpretationResult:
+                            del page_input, context
+                            return InterpretationResult(
+                                interpretation=PageInterpretation(
+                                    page_type=PageType.BLANK,
+                                    metadata=ExtractedMetadata(),
+                                ),
+                                provenance=InterpretationProvenance(
+                                    prompt_version=config.extraction.prompt_version,
+                                    model=config.extraction.model_alias,
+                                    backend="noop",
+                                ),
+                            )
+
+                    process_book(
+                        source=pdf_source,
+                        interpreter=NoopInterpreter(),
+                        store=store,
+                        config=config,
+                        **_process_kwargs(args),
+                    )
+            except BookExtractError as exc:
+                print(f"{exc.code}: {exc}", file=sys.stderr)
+                return exit_code_for_error(exc)
+            finally:
+                pdf_source.close()
     except BookExtractError as exc:
         print(f"{exc.code}: {exc}", file=sys.stderr)
         return exit_code_for_error(exc)
-    finally:
-        pdf_source.close()
     return 0
 
 
