@@ -184,13 +184,14 @@ class RunStore:
     def read_head(self) -> HeadState:
         head_path = self._path("head.json")
         if not head_path.is_file():
-            return HeadState()
+            return HeadState(head_format_version=1, committed_page_count=0)
         return HeadState.model_validate_json(head_path.read_text(encoding="utf-8"))
 
     def write_head(self, committed_page_count: int) -> None:
-        payload = HeadState(committed_page_count=committed_page_count).model_dump(
-            mode="json"
-        )
+        payload = HeadState(
+            head_format_version=1,
+            committed_page_count=committed_page_count,
+        ).model_dump(mode="json")
         head_path = self._path("head.json")
         tmp = self._path("head.json.tmp")
         self.atomic_write_json(tmp, payload)
@@ -200,10 +201,14 @@ class RunStore:
         state_path = self._path("state.json")
         if not state_path.is_file():
             return None
-        return StateCache.model_validate_json(state_path.read_text(encoding="utf-8"))
+        try:
+            return StateCache.model_validate_json(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
 
     def write_state_cache(self, state: BookState, committed_page_count: int) -> None:
         cache = StateCache(
+            state_cache_version=1,
             committed_page_count=committed_page_count,
             state=state,
         )
@@ -295,7 +300,11 @@ class RunStore:
                 dest.write_bytes(content)
                 file_hashes[rel_path] = _sha256_bytes(content)
 
-            manifest = CommitManifest(page_index=page_index, files=file_hashes)
+            manifest = CommitManifest(
+                manifest_format_version=1,
+                page_index=page_index,
+                files=file_hashes,
+            )
             manifest_bytes = (
                 json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=False)
                 + "\n"
@@ -375,13 +384,30 @@ class RunStore:
 
         state = load_book_state_from_commits(self, committed)
         self.write_state_cache(state, committed)
-
-        build_dir = self._path(".output-build")
-        if build_dir.exists() and any(build_dir.iterdir()):
-            self._quarantine(recovery_dir, build_dir, ".output-build")
-            build_dir.mkdir(parents=True, exist_ok=True)
+        self._rebuild_failure_pointers()
 
         return state, committed
+
+    def _rebuild_failure_pointers(self) -> None:
+        failures_root = self._path("failures")
+        if not failures_root.is_dir():
+            return
+        for page_dir in failures_root.iterdir():
+            if not page_dir.is_dir() or not page_dir.name.startswith("page-"):
+                continue
+            failures = sorted(
+                name
+                for name in os.listdir(page_dir)
+                if FAILURE_DIR_RE.match(name)
+            )
+            if not failures:
+                continue
+            latest_name = failures[-1]
+            latest = {
+                "latest_failure_pointer_format_version": 1,
+                "failure_directory": latest_name,
+            }
+            write_json_atomic(page_dir / "latest.json", latest)
 
     def _next_failure_number(self, page_number: int) -> int:
         page_dir = self._path("failures", f"page-{page_number:04d}")
