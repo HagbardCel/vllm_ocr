@@ -155,6 +155,7 @@ def test_projection_preserves_payload_and_order(tmp_path: Path) -> None:
         "messages": [
             {
                 "role": "user",
+                "name": "reader",
                 "content": [
                     {"type": "text", "text": "before"},
                     {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
@@ -169,12 +170,58 @@ def test_projection_preserves_payload_and_order(tmp_path: Path) -> None:
     assert projected == [
         {
             "role": "user",
+            "name": "reader",
             "content": [
                 {"type": "text", "text": "before"},
                 {"type": "text", "text": "after"},
             ],
         }
     ]
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 422])
+def test_non_404_input_tokens_aborts_discovery(tmp_path: Path, status_code: int) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("input_tokens"):
+            return httpx.Response(status_code)
+        return httpx.Response(404)
+
+    client = _client(httpx.MockTransport(handler))
+    with pytest.raises(ProcessingError) as exc_info:
+        client.discover_token_counting_contract(
+            _preflight(reasoning=False),
+            prompt="hello",
+            image_path=_calibration_image(tmp_path),
+            response_format={"type": "json_schema"},
+            thinking_contract=_thinking_contract(),
+        )
+    assert exc_info.value.code == "token-counting-calibration-failed"
+    assert "/apply-template" not in calls
+
+
+def test_malformed_input_tokens_200_aborts_discovery(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("input_tokens"):
+            return httpx.Response(200, content=b"not-json")
+        return httpx.Response(404)
+
+    client = _client(httpx.MockTransport(handler))
+    with pytest.raises(ProcessingError) as exc_info:
+        client.discover_token_counting_contract(
+            _preflight(reasoning=False),
+            prompt="hello",
+            image_path=_calibration_image(tmp_path),
+            response_format={"type": "json_schema"},
+            thinking_contract=_thinking_contract(),
+        )
+    assert exc_info.value.code == "token-counting-calibration-failed"
+    assert "/apply-template" not in calls
 
 
 def test_apply_template_rejects_alias_and_empty_prompt(tmp_path: Path) -> None:

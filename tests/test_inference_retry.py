@@ -166,3 +166,109 @@ def test_unexpected_reasoning_records_attempt_with_context(tmp_path) -> None:
     assert err.context.prompt == b"visible prompt"
     assert err.context.page_image_sha256 == "deadbeef"
     assert err.context.schema_ref == schema_ref
+
+
+def _assert_envelope_failure(
+    exc_info: pytest.ExceptionInfo[InferenceError],
+    *,
+    response_body: bytes,
+    content_type: str,
+    error_code: str,
+    prompt: bytes,
+    schema_ref: bytes,
+    image_hash: str,
+    request_count: int,
+) -> None:
+    err = exc_info.value
+    assert request_count == 1
+    assert err.code == error_code
+    assert err.retryable is False
+    assert err.attempts_exhausted is False
+    assert err.attempts is not None
+    assert len(err.attempts) == 1
+    attempt = err.attempts[0]
+    assert attempt.status_code == 200
+    assert attempt.response_body == response_body
+    assert attempt.content_type == content_type
+    assert attempt.error_code == error_code
+    assert err.context.prompt == prompt
+    assert err.context.page_image_sha256 == image_hash
+    assert err.context.schema_ref == schema_ref
+
+
+def test_invalid_http_response_records_envelope_attempt(tmp_path) -> None:
+    response_body = b"not-json-at-all"
+    content_type = "application/json; charset=utf-8"
+    requests = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1/chat/completions":
+            return httpx.Response(404)
+        requests["count"] += 1
+        return httpx.Response(
+            200,
+            content=response_body,
+            headers={"Content-Type": content_type},
+        )
+
+    client = _client_with_handler(handler)
+    image = tmp_path / "page.png"
+    image.write_bytes(b"png")
+    schema_ref = b'{"type":"object"}'
+    with pytest.raises(InferenceError) as exc_info:
+        client.generate_structured(
+            image_path=image,
+            page_image_sha256="deadbeef",
+            prompt="visible prompt",
+            response_model=_SmokeModel,
+            schema_ref=schema_ref,
+        )
+    _assert_envelope_failure(
+        exc_info,
+        response_body=response_body,
+        content_type=content_type,
+        error_code="invalid-http-response",
+        prompt=b"visible prompt",
+        schema_ref=schema_ref,
+        image_hash="deadbeef",
+        request_count=requests["count"],
+    )
+
+
+def test_invalid_completion_envelope_records_envelope_attempt(tmp_path) -> None:
+    response_body = json.dumps({"object": "chat.completion"}).encode()
+    content_type = "application/json"
+    requests = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1/chat/completions":
+            return httpx.Response(404)
+        requests["count"] += 1
+        return httpx.Response(
+            200,
+            content=response_body,
+            headers={"Content-Type": content_type},
+        )
+
+    client = _client_with_handler(handler)
+    image = tmp_path / "page.png"
+    image.write_bytes(b"png")
+    schema_ref = b'{"type":"object"}'
+    with pytest.raises(InferenceError) as exc_info:
+        client.generate_structured(
+            image_path=image,
+            page_image_sha256="image-hash",
+            prompt="visible prompt",
+            response_model=_SmokeModel,
+            schema_ref=schema_ref,
+        )
+    _assert_envelope_failure(
+        exc_info,
+        response_body=response_body,
+        content_type=content_type,
+        error_code="invalid-completion-envelope",
+        prompt=b"visible prompt",
+        schema_ref=schema_ref,
+        image_hash="image-hash",
+        request_count=requests["count"],
+    )

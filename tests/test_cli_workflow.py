@@ -26,6 +26,7 @@ from bookextract.fingerprints import fingerprint_file
 from bookextract.inference.bootstrap import prepare_inference_environment
 from bookextract.inference.llamacpp import LlamaCppVisionClient
 from bookextract.models import InferenceEnvironment, ServerInferenceIdentity
+from bookextract.pdf import PdfPageSource
 from bookextract.storage import RunStore
 from tests.conftest import make_inference_environment
 
@@ -55,6 +56,81 @@ def _run_artifacts(run_dir: Path) -> set[str]:
         if path.exists():
             names.add(path.name)
     return names
+
+
+def _run_has_poisoned_layout(run_dir: Path) -> bool:
+    return (
+        (run_dir / "commits").exists()
+        or (run_dir / "run.json").exists()
+        or (run_dir / "head.json").exists()
+        or (run_dir / "inference-location.json").exists()
+    )
+
+
+def _write_frozen_env_with_incomplete_projector(
+    store: RunStore,
+    *,
+    model: Path,
+    projector: Path,
+) -> None:
+    model_fp = fingerprint_file(model)
+    projector_fp = fingerprint_file(projector).model_copy(update={"sha256": None})
+    env = make_inference_environment().model_copy(
+        update={
+            "fingerprints_complete": True,
+            "model_file": model_fp,
+            "projector_file": projector_fp,
+            "server": make_inference_environment().server.model_copy(
+                update={"server_reported_model_path": str(model)}
+            ),
+        }
+    )
+    store.write_inference_environment(env)
+
+
+def _bootstrap_mock_handler(model_path: Path, *, model_alias: str = "vision-model"):
+    valid_completion = json.dumps(
+        {
+            "id": "1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": model_alias,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"content": '{"page_type":"blank","blocks":[]}'},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, content=b"ok")
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                content=json.dumps({"data": [{"id": model_alias}]}).encode(),
+            )
+        if request.url.path == "/props":
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    {
+                        "build_info": "b1",
+                        "model_path": str(model_path),
+                        "modalities": {"vision": True},
+                        "default_generation_settings": {"n_ctx": 32768},
+                        "chat_template": "",
+                    }
+                ).encode(),
+            )
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(200, content=valid_completion.encode())
+        return httpx.Response(404)
+
+    return handler
 
 
 def test_init_requires_model_arg(minimal_pdf: Path, tmp_path: Path) -> None:
@@ -170,6 +246,50 @@ def test_init_persists_process_options(minimal_pdf: Path, tmp_path: Path) -> Non
     )
     record = RunRecord.model_validate_json((run_dir / "run.json").read_text(encoding="utf-8"))
     assert record.process_options.llama_base_url == "http://custom:9999"
+
+
+def test_init_invalid_pdf_leaves_no_layout_and_retry_succeeds(
+    minimal_pdf: Path, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.toml"
+    model = tmp_path / "model.gguf"
+    run_dir = tmp_path / "run"
+    bad_pdf = tmp_path / "bad.pdf"
+    _write_config(config)
+    model.write_bytes(b"model")
+    bad_pdf.write_bytes(b"not-a-pdf")
+
+    exit_code = main(
+        [
+            "init",
+            str(bad_pdf),
+            "--run",
+            str(run_dir),
+            "--config",
+            str(config),
+            "--model",
+            str(model),
+        ]
+    )
+    assert exit_code == 14
+    assert not _run_has_poisoned_layout(run_dir)
+
+    assert (
+        main(
+            [
+                "init",
+                str(minimal_pdf),
+                "--run",
+                str(run_dir),
+                "--config",
+                str(config),
+                "--model",
+                str(model),
+            ]
+        )
+        == 0
+    )
+    assert (run_dir / "run.json").is_file()
 
 
 def _initialized_run(
@@ -328,6 +448,65 @@ def test_relocate_incomplete_fingerprints_fail_closed(
     assert exit_code == 13
 
 
+@pytest.mark.parametrize(
+    ("argv_suffix",),
+    [
+        (["--clear-projector"],),
+        (["--projector"],),
+        (["--model"],),
+    ],
+)
+def test_relocate_rejects_incomplete_projector_fingerprint(
+    tmp_path: Path,
+    minimal_pdf: Path,
+    argv_suffix: list[str],
+) -> None:
+    run_dir, model, projector = _initialized_run(
+        tmp_path,
+        minimal_pdf,
+        model_bytes=b"model-a",
+        projector_bytes=b"proj-a",
+    )
+    assert projector is not None
+    store = RunStore(run_dir)
+    _write_frozen_env_with_incomplete_projector(store, model=model, projector=projector)
+    location_path = run_dir / "inference-location.json"
+    original = location_path.read_bytes()
+
+    if argv_suffix == ["--projector"]:
+        new_projector = tmp_path / "new.proj"
+        new_projector.write_bytes(b"proj-a")
+        argv = ["--projector", str(new_projector)]
+    elif argv_suffix == ["--model"]:
+        new_model = tmp_path / "alias.gguf"
+        new_model.write_bytes(b"model-a")
+        argv = ["--model", str(new_model)]
+    else:
+        argv = list(argv_suffix)
+
+    exit_code = main(["relocate-inference-files", "--run", str(run_dir), *argv])
+    assert exit_code == 13
+    assert location_path.read_bytes() == original
+
+
+def test_relocate_missing_inference_location_exits_cleanly(
+    tmp_path: Path, minimal_pdf: Path
+) -> None:
+    run_dir, model, _ = _initialized_run(tmp_path, minimal_pdf)
+    location_path = run_dir / "inference-location.json"
+    location_path.unlink()
+    exit_code = main(
+        [
+            "relocate-inference-files",
+            "--run",
+            str(run_dir),
+            "--model",
+            str(model),
+        ]
+    )
+    assert exit_code == 13
+
+
 def test_first_process_passes_render_callback(
     tmp_path: Path, minimal_pdf: Path
 ) -> None:
@@ -422,6 +601,55 @@ def test_calibration_render_failure_persisted(tmp_path: Path, minimal_pdf: Path)
     failure_dir = run_dir / "failures" / "page-0001"
     assert failure_dir.is_dir()
     assert store.read_head().committed_page_count == 0
+
+
+def test_process_calibration_render_failure_via_cli(
+    tmp_path: Path, minimal_pdf: Path
+) -> None:
+    run_dir, model, _ = _initialized_run(tmp_path, minimal_pdf)
+    handler = _bootstrap_mock_handler(model)
+    real_init = LlamaCppVisionClient.__init__
+
+    def inject_mock_client(
+        self: LlamaCppVisionClient,
+        config: object,
+        *,
+        environment: InferenceEnvironment | None = None,
+        client: httpx.Client | None = None,
+    ) -> None:
+        if client is None:
+            from bookextract.config import ProcessingConfig
+
+            assert isinstance(config, ProcessingConfig)
+            client = httpx.Client(
+                base_url=config.process.llama_base_url.rstrip("/"),
+                transport=httpx.MockTransport(handler),
+            )
+        real_init(self, config, environment=environment, client=client)
+
+    original_render = PdfPageSource.render_page
+
+    def failing_render(
+        self: PdfPageSource, page_index: int, *, dpi: int | None = None
+    ) -> object:
+        if page_index == 0:
+            raise ProcessingError(code="page-render-failed", message="render failed")
+        return original_render(self, page_index, dpi=dpi)
+
+    with (
+        patch.object(LlamaCppVisionClient, "__init__", inject_mock_client),
+        patch.object(PdfPageSource, "render_page", failing_render),
+    ):
+        exit_code = main(["process", "--run", str(run_dir), "--interpreter", "vlm"])
+
+    assert exit_code == 13
+    failure_page_dir = run_dir / "failures" / "page-0001"
+    assert failure_page_dir.is_dir()
+    error_files = list(failure_page_dir.rglob("error.json"))
+    assert len(error_files) == 1
+    assert json.loads(error_files[0].read_text(encoding="utf-8"))["code"] == "page-render-failed"
+    assert RunStore(run_dir).read_head().committed_page_count == 0
+    assert list((run_dir / "commits").glob("page-*")) == []
 
 
 def test_bootstrap_later_environment_never_calls_render(tmp_path: Path) -> None:
