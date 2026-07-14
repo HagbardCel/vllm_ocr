@@ -136,9 +136,7 @@ def apply_assessment(state: BookState, assessment: PageAssessment) -> BookState:
                 heading_stack.append(summary)
             if block.role == TextRole.PARAGRAPH:
                 text = _inline_to_text(block)
-                if block.continues_previous:
-                    open_tail = None
-                elif block.continues_on_next_page:
+                if block.continues_on_next_page:
                     open_tail = text[-500:] if len(text) > 500 else text
                 else:
                     open_tail = None

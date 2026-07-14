@@ -6,10 +6,14 @@ import json
 from dataclasses import dataclass
 from typing import Protocol
 
-from bookextract.artifacts import InferenceAttempt, InterpretationResult
+from bookextract.artifacts import (
+    InferenceAttempt,
+    InterpretationResult,
+    validate_artifact_filenames,
+)
 from bookextract.config import ProcessingConfig
 from bookextract.context import build_page_context
-from bookextract.errors import InferenceError, StructuralError
+from bookextract.errors import InferenceError, ProcessingError, StructuralError
 from bookextract.models import (
     BookDocument,
     BookState,
@@ -135,7 +139,7 @@ def process_book(
     for page_index in range(start_index, end_index):
         context = build_page_context(state)
         page_input: PageInput | None = None
-        is_final_page = page_index == end_index - 1
+        is_final_source_page = page_index + 1 == source.page_count
 
         try:
             rendered = source.render_page(
@@ -146,6 +150,25 @@ def process_book(
                 rendered=rendered,
             )
             result = interpreter.interpret(page_input=page_input, context=context)
+        except ProcessingError as exc:
+            if exc.code not in {"page-image-too-large", "page-render-failed"}:
+                raise
+            store.persist_failure(
+                page_number=page_index + 1,
+                context=context.model_dump(mode="json"),
+                page_input={
+                    "page_index": page_index,
+                    "stage": "rendering",
+                    "render_dpi": config.extraction.render_dpi,
+                    "render_annotations": config.extraction.render_annotations,
+                },
+                prompt=b"",
+                schema_ref={},
+                request_summary={},
+                error={"code": exc.code, "message": str(exc)},
+                attempts=None,
+            )
+            raise
         except InferenceError as exc:
             planned_input = {
                 "page_index": page_index,
@@ -177,6 +200,7 @@ def process_book(
             raise
 
         interpretation = assign_block_ids(result.interpretation, page_index)
+        validate_artifact_filenames(result.artifacts)
         result = InterpretationResult(
             interpretation=interpretation,
             provenance=result.provenance,
@@ -208,7 +232,7 @@ def process_book(
         interpretation, figure_files = _collect_figure_assets(interpretation, rendered)
         assessment = assessment.model_copy(update={"interpretation": interpretation})
 
-        if is_final_page:
+        if is_final_source_page:
             prospective_state = apply_assessment(state, assessment)
             prospective_document = BookDocument(pages=[*document.pages, assessment])
             try:
@@ -233,8 +257,7 @@ def process_book(
 
         extra_files: dict[str, bytes] = dict(figure_files)
         for artifact in result.artifacts:
-            rel = artifact.logical_name
-            extra_files[rel] = artifact.content
+            extra_files[artifact.filename] = artifact.content
 
         commit_files = build_commit_payload(
             assessment=assessment,

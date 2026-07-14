@@ -7,7 +7,7 @@ from pathlib import Path
 
 import fitz
 
-from bookextract.errors import InferenceError, InferenceFailureContext
+from bookextract.errors import ProcessingError
 from bookextract.models import (
     MAX_PAGE_IMAGE_BYTES,
     BoundingBox,
@@ -153,6 +153,17 @@ class PdfPageSource:
         self.close()
 
     def render_page(self, page_index: int, *, dpi: int | None = None) -> RenderedPage:
+        try:
+            return self._render_page_impl(page_index, dpi=dpi)
+        except ProcessingError:
+            raise
+        except Exception as exc:
+            raise ProcessingError(
+                code="page-render-failed",
+                message=f"failed to render page {page_index}",
+            ) from exc
+
+    def _render_page_impl(self, page_index: int, *, dpi: int | None = None) -> RenderedPage:
         render_dpi = dpi if dpi is not None else self._dpi
         self._pages_dir.mkdir(parents=True, exist_ok=True)
         image_path = self._pages_dir / f"page-{page_index + 1:04d}.png"
@@ -173,17 +184,8 @@ class PdfPageSource:
             width_px = pix.width
             height_px = pix.height
             if len(png_bytes) > MAX_PAGE_IMAGE_BYTES:
-                raise InferenceError(
+                raise ProcessingError(
                     code="page-image-too-large",
-                    retryable=False,
-                    attempts_exhausted=False,
-                    context=InferenceFailureContext(
-                        prompt=b"",
-                        request_summary=b"{}",
-                        schema_ref=b"{}",
-                        page_image_sha256="",
-                        wire_request_sha256=None,
-                    ),
                     message=f"rendered page exceeds {MAX_PAGE_IMAGE_BYTES} bytes",
                 )
             image_path.write_bytes(png_bytes)
