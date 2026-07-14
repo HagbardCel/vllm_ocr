@@ -77,12 +77,20 @@ class LlamaModelsResponse(LlamaWireModel):
     data: list[LlamaModelEntry]
 
 
+class LlamaPropsBuildInfo(LlamaWireModel):
+    build_number: int | None = None
+    commit: str | None = None
+
+
 class LlamaPropsResponse(LlamaWireModel):
     build_commit: str | None = Field(default=None, alias="build")
     build_number: int | None = None
+    build_info: LlamaPropsBuildInfo | None = None
     model_path: str | None = None
     default_generation_settings: dict[str, Any] | None = None
     chat_template: str | None = None
+    chat_template_caps: dict[str, Any] | None = None
+    media_marker: str | None = None
     modalities: dict[str, Any] | None = None
     total_slots: int | None = None
 
@@ -167,9 +175,7 @@ class LlamaCppVisionClient:
                 message=f"invalid /props response: {exc}",
             ) from exc
 
-        llama_cpp_build = props.build_commit or (
-            str(props.build_number) if props.build_number is not None else None
-        )
+        llama_cpp_build = self._llama_cpp_build_from_props(props)
         if not llama_cpp_build:
             raise ProcessingError(
                 code="unsupported-llama-server-contract",
@@ -182,6 +188,8 @@ class LlamaCppVisionClient:
                 message="missing model_path in /props",
             )
 
+        self._require_vision_modalities(props)
+
         context_size = self._context_size_from_props(props)
         self.check_static_context_feasibility(context_size)
 
@@ -190,7 +198,7 @@ class LlamaCppVisionClient:
             llama_cpp_build=llama_cpp_build,
             model_alias=model_alias,
             context_size=context_size,
-            vision_supported=self._vision_supported(props),
+            vision_supported=True,
             chat_template_sha256=chat_template_sha256,
             server_reported_model_path=props.model_path,
         )
@@ -272,7 +280,10 @@ class LlamaCppVisionClient:
                     )
                 return contract
 
-        if self._probe_apply_template_tokenize(image_payload, discovery=True) is not None:
+        if self._apply_template_tokenize_supported(
+            image_payload,
+            thinking_contract=thinking_contract,
+        ):
             return ApplyTemplateTokenizeContract(
                 mode="apply-template-tokenize",
                 image_token_policy="configured-reserve",
@@ -392,6 +403,12 @@ class LlamaCppVisionClient:
         request_summary["context_budget"] = budget.model_dump(mode="json")
         wire_body = serialize_wire_request(payload)
         wire_request_sha256 = sha256_hex(wire_body)
+        sanitized_summary = {
+            **request_summary,
+            "stage": "serialized",
+            "wire_request_sha256": wire_request_sha256,
+            "image_sha256": page_image_sha256,
+        }
         failure_context = self._failure_context(
             prompt=prompt,
             request_summary=request_summary,
@@ -411,13 +428,15 @@ class LlamaCppVisionClient:
 
         attempts: list[InferenceAttempt] = []
         max_attempts = self._config.process.max_attempts
+        server_error_retries_used = 0
         for attempt_number in range(1, max_attempts + 1):
             started = time.monotonic()
             try:
-                parsed, status_code, raw_body, finish_reason = self._complete_with_raw(wire_body)
+                parsed, status_code, raw_body = self._complete_with_raw(wire_body)
             except _TransportFailure as exc:
                 elapsed_ms = (time.monotonic() - started) * 1000
-                retryable = attempt_number < max_attempts
+                if exc.error_code == "http-server-error":
+                    server_error_retries_used += 1
                 attempts.append(
                     InferenceAttempt(
                         attempt_number=attempt_number,
@@ -430,23 +449,29 @@ class LlamaCppVisionClient:
                         elapsed_ms=elapsed_ms,
                     )
                 )
-                if not retryable:
+                if not self._may_retry(
+                    exc.error_code,
+                    attempt_number=attempt_number,
+                    max_attempts=max_attempts,
+                    server_error_retries_used=server_error_retries_used,
+                ):
                     break
                 self._sleep_backoff(attempt_number, exc.retry_after_seconds)
                 continue
 
             elapsed_ms = (time.monotonic() - started) * 1000
+            finish_reason = (
+                parsed.choices[0].finish_reason if parsed.choices else None
+            )
             try:
                 self._enforce_non_thinking_response(parsed, thinking_contract)
-                content = parsed.choices[0].message.content
-                if not content:
-                    raise _CompletionFailure("empty-response", "completion content was empty")
-                value = response_model.model_validate_json(content)
-            except (InferenceError, _CompletionFailure, ValidationError, IndexError) as exc:
-                if isinstance(exc, InferenceError):
-                    raise
-                error_code = getattr(exc, "code", "invalid-structured-response")
-                message = str(exc)
+                value = self._parse_assistant_content(
+                    parsed,
+                    response_model=response_model,
+                )
+            except InferenceError:
+                raise
+            except _CompletionFailure as exc:
                 attempts.append(
                     InferenceAttempt(
                         attempt_number=attempt_number,
@@ -454,8 +479,8 @@ class LlamaCppVisionClient:
                         status_code=status_code,
                         response_body=raw_body,
                         content_type="application/json",
-                        error_code=error_code,
-                        error_message=message,
+                        error_code=exc.code,
+                        error_message=str(exc),
                         elapsed_ms=elapsed_ms,
                         finish_reason=finish_reason,
                     )
@@ -478,13 +503,18 @@ class LlamaCppVisionClient:
                     stage="serialized",
                     wire_request_sha256=wire_request_sha256,
                 ),
+                request_summary=sanitized_summary,
                 attempts=tuple(attempts),
             )
 
         raise InferenceError(
             code=attempts[-1].error_code or "transport-timeout",
-            retryable=attempts[-1].error_code
-            in {"transport-timeout", "http-retryable", "empty-response"},
+            retryable=self._may_retry(
+                attempts[-1].error_code or "transport-timeout",
+                attempt_number=len(attempts),
+                max_attempts=max_attempts,
+                server_error_retries_used=server_error_retries_used,
+            ),
             attempts_exhausted=len(attempts) >= max_attempts,
             context=failure_context,
             attempts=tuple(attempts),
@@ -580,7 +610,7 @@ class LlamaCppVisionClient:
             if response.status_code == 400:
                 if discovery:
                     raise ProcessingError(
-                        code="unsupported-thinking-control",
+                        code="token-counting-calibration-failed",
                         message="input_tokens rejected production request shape",
                     )
                 raise ProcessingError(code="token-counting-contract-drift")
@@ -762,12 +792,17 @@ class LlamaCppVisionClient:
         allow_retry: bool,
     ) -> LlamaChatCompletionResponse:
         try:
-            response, _, raw_body, _ = self._complete_with_raw(wire_body)
+            response, _, _ = self._complete_with_raw(wire_body)
             return response
         except _TransportFailure as exc:
-            if allow_retry:
+            if allow_retry and self._may_retry(
+                exc.error_code,
+                attempt_number=1,
+                max_attempts=2,
+                server_error_retries_used=0,
+            ):
                 time.sleep(self._config.process.retry_backoff_seconds)
-                response, _, raw_body, _ = self._complete_with_raw(wire_body)
+                response, _, _ = self._complete_with_raw(wire_body)
                 return response
             if exc.error_code == "transport-timeout":
                 raise InferenceError(
@@ -777,17 +812,21 @@ class LlamaCppVisionClient:
                     context=self._empty_failure_context(),
                 ) from exc
             raise ProcessingError(code="thinking-control-contract-drift") from exc
+        except _CompletionFailure as exc:
+            raise ProcessingError(code="thinking-control-contract-drift", message=exc.code) from exc
 
-    def _complete_with_raw(
-        self,
-        wire_body: bytes,
-    ) -> tuple[LlamaChatCompletionResponse, int, bytes, str | None]:
+    def _perform_http_request(self, wire_body: bytes) -> tuple[httpx.Response, bytes]:
         try:
             response = self._client.post(
                 "/v1/chat/completions",
                 content=wire_body,
                 headers={"Content-Type": "application/json"},
             )
+        except httpx.RemoteProtocolError as exc:
+            raise _TransportFailure(
+                error_code="response-body-truncated",
+                message=str(exc),
+            ) from exc
         except httpx.TimeoutException as exc:
             raise _TransportFailure(
                 error_code="transport-timeout",
@@ -795,63 +834,99 @@ class LlamaCppVisionClient:
             ) from exc
         except httpx.TransportError as exc:
             raise _TransportFailure(
-                error_code="transport-timeout",
+                error_code="transport-error",
                 message=str(exc),
             ) from exc
+        return response, response.content
 
-        raw_body = response.content
-        if response.status_code in _TRANSIENT_STATUS_CODES:
+    def _classify_http_status(self, status_code: int) -> str | None:
+        if status_code == 200:
+            return None
+        if status_code in _TRANSIENT_STATUS_CODES:
+            return "http-retryable"
+        if status_code >= 500:
+            return "http-server-error"
+        return "http-client-error"
+
+    def _complete_with_raw(
+        self,
+        wire_body: bytes,
+    ) -> tuple[LlamaChatCompletionResponse, int, bytes]:
+        response, raw_body = self._perform_http_request(wire_body)
+        status_failure = self._classify_http_status(response.status_code)
+        if status_failure is not None:
             retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
             raise _TransportFailure(
-                error_code="http-retryable",
-                message=f"retryable HTTP {response.status_code}",
+                error_code=status_failure,
+                message=f"HTTP {response.status_code}",
                 status_code=response.status_code,
                 body=raw_body,
                 content_type=response.headers.get("Content-Type"),
                 retry_after_seconds=retry_after,
             )
-        if response.status_code >= 500:
-            raise _TransportFailure(
-                error_code="http-server-error",
-                message=f"server error HTTP {response.status_code}",
-                status_code=response.status_code,
-                body=raw_body,
-                content_type=response.headers.get("Content-Type"),
-            )
-        if response.status_code != 200:
-            raise _TransportFailure(
-                error_code="http-server-error",
-                message=f"unexpected HTTP {response.status_code}",
-                status_code=response.status_code,
-                body=raw_body,
-                content_type=response.headers.get("Content-Type"),
-            )
-        if not raw_body:
-            raise _TransportFailure(
-                error_code="empty-response",
-                message="empty HTTP body",
-                status_code=response.status_code,
-            )
+
         try:
-            parsed = LlamaChatCompletionResponse.model_validate_json(raw_body)
-        except ValidationError as exc:
-            raise _TransportFailure(
-                error_code="response-body-truncated",
-                message=f"invalid completion JSON: {exc}",
-                status_code=response.status_code,
-                body=raw_body,
-                content_type=response.headers.get("Content-Type"),
+            envelope_data = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise _CompletionFailure(
+                "invalid-http-response",
+                "response body is not valid JSON",
             ) from exc
 
-        finish_reason = parsed.choices[0].finish_reason if parsed.choices else None
-        if finish_reason == "length":
+        try:
+            envelope = LlamaChatCompletionResponse.model_validate(envelope_data)
+        except ValidationError as exc:
+            raise _CompletionFailure(
+                "invalid-completion-envelope",
+                f"invalid completion envelope: {exc}",
+            ) from exc
+
+        return envelope, response.status_code, raw_body
+
+    def _parse_assistant_content(
+        self,
+        envelope: LlamaChatCompletionResponse,
+        *,
+        response_model: type[ResponseT],
+    ) -> ResponseT:
+        if not envelope.choices:
+            raise _CompletionFailure("empty-response", "missing choices")
+        choice = envelope.choices[0]
+        if choice.finish_reason == "length":
             raise _CompletionFailure("output-token-limit", "finish_reason=length")
+        content = choice.message.content
+        if content is None or content == "":
+            raise _CompletionFailure("empty-response", "completion content was empty")
+        try:
+            return response_model.model_validate_json(content)
+        except json.JSONDecodeError as exc:
+            raise _CompletionFailure("invalid-json", "assistant content is not JSON") from exc
+        except ValidationError as exc:
+            raise _CompletionFailure(
+                "invalid-structured-response",
+                f"assistant content failed schema validation: {exc}",
+            ) from exc
 
-        content = parsed.choices[0].message.content if parsed.choices else None
-        if content == "":
-            raise _CompletionFailure("empty-response", "empty completion content")
-
-        return parsed, response.status_code, raw_body, finish_reason
+    @staticmethod
+    def _may_retry(
+        error_code: str,
+        *,
+        attempt_number: int,
+        max_attempts: int,
+        server_error_retries_used: int,
+    ) -> bool:
+        if attempt_number >= max_attempts:
+            return False
+        if error_code in {
+            "response-body-truncated",
+            "transport-timeout",
+            "transport-error",
+            "http-retryable",
+        }:
+            return True
+        if error_code == "http-server-error":
+            return server_error_retries_used < 1
+        return False
 
     def _build_chat_payload(
         self,
@@ -1033,20 +1108,133 @@ class LlamaCppVisionClient:
             message="could not determine context size from /props",
         )
 
-    def _vision_supported(self, props: LlamaPropsResponse) -> bool:
-        modalities = props.modalities or {}
-        if isinstance(modalities.get("vision"), bool):
-            return bool(modalities["vision"])
-        if isinstance(modalities.get("image"), bool):
-            return bool(modalities["image"])
+    def _llama_cpp_build_from_props(self, props: LlamaPropsResponse) -> str | None:
+        if props.build_commit:
+            return props.build_commit
+        if props.build_info is not None:
+            if props.build_info.commit:
+                return props.build_info.commit
+            if props.build_info.build_number is not None:
+                return str(props.build_info.build_number)
+        if props.build_number is not None:
+            return str(props.build_number)
+        return None
+
+    def _require_vision_modalities(self, props: LlamaPropsResponse) -> None:
+        modalities = props.modalities
+        if modalities is None:
+            raise ProcessingError(
+                code="unsupported-llama-server-contract",
+                message="missing modalities in /props",
+            )
+        if "vision" not in modalities:
+            raise ProcessingError(
+                code="unsupported-llama-server-contract",
+                message="missing modalities.vision in /props",
+            )
+        vision = modalities["vision"]
+        if not isinstance(vision, bool):
+            raise ProcessingError(
+                code="unsupported-llama-server-contract",
+                message="modalities.vision must be a boolean",
+            )
+        if not vision:
+            raise ProcessingError(
+                code="unsupported-llama-server-contract",
+                message="modalities.vision is false",
+            )
+
+    def _apply_template_tokenize_supported(
+        self,
+        payload: dict[str, Any],
+        *,
+        thinking_contract: ThinkingControlContract,
+    ) -> bool:
+        """Return True only when /apply-template honors required non-thinking settings."""
+        if self._probe_apply_template_tokenize(payload, discovery=True) is None:
+            return False
+        return self._apply_template_equivalence_gate(payload, thinking_contract)
+
+    def _apply_template_equivalence_gate(
+        self,
+        payload: dict[str, Any],
+        thinking_contract: ThinkingControlContract,
+    ) -> bool:
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return False
+
+        base_kwargs = payload.get("chat_template_kwargs")
+        if not isinstance(base_kwargs, dict):
+            base_kwargs = {}
+
+        non_thinking = self._post_apply_template(
+            messages=messages,
+            chat_template_kwargs={**base_kwargs, "enable_thinking": False},
+            reasoning_format="none",
+        )
+        if non_thinking is None:
+            return False
+
+        if thinking_contract.enable_thinking:
+            thinking = self._post_apply_template(
+                messages=messages,
+                chat_template_kwargs={**base_kwargs, "enable_thinking": True},
+                reasoning_format=thinking_contract.reasoning_format,
+            )
+            if thinking is None:
+                return False
+
         return True
 
+    def _post_apply_template(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        chat_template_kwargs: dict[str, Any],
+        reasoning_format: str,
+    ) -> str | None:
+        body = {
+            "model": self._config.extraction.model_alias,
+            "messages": messages,
+            "chat_template_kwargs": chat_template_kwargs,
+            "reasoning_format": reasoning_format,
+        }
+        try:
+            response = self._client.post(
+                "/apply-template",
+                content=serialize_wire_request(body),
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.TransportError:
+            return None
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            parsed = json.loads(response.content)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, str):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in ("prompt", "text", "template"):
+                value = parsed.get(key)
+                if isinstance(value, str):
+                    return value
+        return None
+
     def _media_marker(self, props: LlamaPropsResponse) -> str | None:
+        if props.media_marker is not None:
+            return str(props.media_marker)
         modalities = props.modalities or {}
         marker = modalities.get("media_marker")
         return str(marker) if marker is not None else None
 
     def _chat_template_caps(self, props: LlamaPropsResponse) -> dict[str, object]:
+        if isinstance(props.chat_template_caps, dict):
+            return dict(props.chat_template_caps)
         settings = props.default_generation_settings or {}
         caps = settings.get("chat_template_caps")
         if isinstance(caps, dict):

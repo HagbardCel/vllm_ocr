@@ -1,0 +1,14 @@
+{
+  "default_generation_settings": {
+    "n_ctx": 32768
+  },
+  "total_slots": 1,
+  "model_path": "/models/text-only.gguf",
+  "modalities": {
+    "vision": false
+  },
+  "build_info": {
+    "commit": "novision123"
+  },
+  "chat_template": "template"
+}

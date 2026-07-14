@@ -45,7 +45,6 @@ def _assert_server_identity(
         "context_size",
         "vision_supported",
         "chat_template_sha256",
-        "server_reported_model_path",
     )
     for field in fields:
         if getattr(current, field) != getattr(stored, field):
@@ -120,20 +119,14 @@ def prepare_inference_environment(
     response_format = build_wire_response_format(client._config.extraction.wire_schema_version)
 
     if existing is None:
+        thinking_contract = client.calibrate_thinking_control(preflight)
         token_contract = client.discover_token_counting_contract(
             preflight,
             prompt=calibration_prompt,
             image_path=calibration_image,
             response_format=response_format,
-            thinking_contract=ThinkingControlContract(
-                reasoning_format="none",
-                applied_template_probe_supported=False,
-                model_alias=preflight.identity.model_alias,
-                llama_cpp_build=preflight.identity.llama_cpp_build,
-                chat_template_sha256=preflight.identity.chat_template_sha256,
-            ),
+            thinking_contract=thinking_contract,
         )
-        thinking_contract = client.calibrate_thinking_control(preflight)
         environment = InferenceEnvironment(
             server=preflight.identity,
             model_file=model_file,

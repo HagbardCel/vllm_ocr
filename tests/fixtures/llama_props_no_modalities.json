@@ -1,0 +1,11 @@
+{
+  "default_generation_settings": {
+    "n_ctx": 32768
+  },
+  "total_slots": 1,
+  "model_path": "/models/text-only.gguf",
+  "build_info": {
+    "commit": "textonly123"
+  },
+  "chat_template": "template"
+}
