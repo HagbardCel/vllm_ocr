@@ -103,19 +103,22 @@ class VlmPageInterpreter:
         failed_attempts = tuple(a for a in attempts if not a.succeeded)
         artifacts: list[PendingArtifact] = [
             PendingArtifact(
-                logical_name="prompt.txt",
+                logical_name="prompt",
+                filename="prompt.txt",
                 media_type="text/plain",
                 content=prompt.encode("utf-8"),
             ),
             PendingArtifact(
-                logical_name="request-summary.json",
+                logical_name="request-summary",
+                filename="request-summary.json",
                 media_type="application/json",
                 content=json.dumps(request_summary, indent=2, ensure_ascii=False).encode(
                     "utf-8"
                 ),
             ),
             PendingArtifact(
-                logical_name="response.json",
+                logical_name="response",
+                filename="response.json",
                 media_type="application/json",
                 content=raw_body,
             ),

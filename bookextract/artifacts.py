@@ -5,17 +5,62 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Generic, Literal, TypeVar
 
+from bookextract.errors import ProcessingError
 from bookextract.models import InterpretationProvenance, PageInterpretation
 
 T = TypeVar("T")
+
+_RESERVED_COMMIT_FILENAMES = frozenset(
+    {
+        "manifest.json",
+        "page-assessment.json",
+        "page-context.json",
+        "interpretation.json",
+        "provenance.json",
+        "assets",
+        "attempts",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class PendingArtifact:
     logical_name: str
+    filename: str
     media_type: str
     content: bytes
-    filename: str | None = None
+
+
+def validate_artifact_filenames(artifacts: tuple[PendingArtifact, ...]) -> None:
+    seen: set[str] = set()
+    for artifact in artifacts:
+        filename = artifact.filename
+        if not filename or filename != filename.strip():
+            raise ProcessingError(
+                code="duplicate-artifact-name",
+                message="artifact filename must be a non-empty basename",
+            )
+        if "/" in filename or "\\" in filename:
+            raise ProcessingError(
+                code="duplicate-artifact-name",
+                message=f"artifact filename must not contain path separators: {filename!r}",
+            )
+        if filename in {".", ".."}:
+            raise ProcessingError(
+                code="duplicate-artifact-name",
+                message=f"artifact filename is reserved: {filename!r}",
+            )
+        if filename in _RESERVED_COMMIT_FILENAMES:
+            raise ProcessingError(
+                code="duplicate-artifact-name",
+                message=f"artifact filename collides with reserved commit name: {filename!r}",
+            )
+        if filename in seen:
+            raise ProcessingError(
+                code="duplicate-artifact-name",
+                message=f"duplicate artifact filename: {filename!r}",
+            )
+        seen.add(filename)
 
 
 @dataclass(frozen=True, slots=True)
