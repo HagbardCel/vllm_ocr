@@ -55,6 +55,7 @@ class InferenceResult(Generic[T]):
     value: T
     final_raw_body: bytes
     request_snapshot: RequestSnapshot
+    request_summary: dict[str, object]
     attempts: tuple[InferenceAttempt, ...]
 
 

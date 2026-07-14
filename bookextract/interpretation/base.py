@@ -21,7 +21,13 @@ class VisionModelClient(Protocol):
         page_image_sha256: str,
         prompt: str,
         response_model: type[T],
-    ) -> tuple[T, InterpretationProvenance, tuple[InferenceAttempt, ...], bytes]: ...
+    ) -> tuple[
+        T,
+        InterpretationProvenance,
+        tuple[InferenceAttempt, ...],
+        bytes,
+        dict[str, object],
+    ]: ...
 
 
 class PageInterpreter(Protocol):
