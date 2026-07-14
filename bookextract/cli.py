@@ -59,7 +59,7 @@ def _wire_schema_sha256() -> str:
 
 def cmd_init(args: argparse.Namespace) -> int:
     pdf_path = Path(args.pdf).resolve()
-    run_dir = Path(args.run).resolve()
+    run_arg = Path(args.run)
     config_path = Path(args.config).resolve()
 
     if not pdf_path.is_file():
@@ -67,10 +67,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 2
 
     config = load_processing_config(config_path)
-    run_dir.mkdir(parents=True, exist_ok=True)
 
-    with acquire_run_lock(run_dir):
-        store = RunStore(run_dir)
+    with acquire_run_lock(run_arg):
+        run_dir = run_arg.resolve()
         if (
             (run_dir / "run.json").exists()
             or (run_dir / "head.json").exists()
@@ -80,6 +79,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             print("run-already-initialized", file=sys.stderr)
             return 13
 
+        run_dir.mkdir(parents=True, exist_ok=True)
+        store = RunStore(run_dir)
         store.ensure_layout()
 
         sha256, size_bytes = _hash_file(pdf_path)
@@ -142,11 +143,12 @@ def _process_kwargs(args: argparse.Namespace) -> dict[str, int | None]:
 
 
 def cmd_process(args: argparse.Namespace) -> int:
-    run_dir = Path(args.run).resolve()
-    config = _resolve_config(args, run_dir)
+    run_arg = Path(args.run)
 
     try:
-        with acquire_run_lock(run_dir):
+        with acquire_run_lock(run_arg):
+            run_dir = run_arg.resolve()
+            config = _resolve_config(args, run_dir)
             store = RunStore(run_dir)
             store.recover()
 
