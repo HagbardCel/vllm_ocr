@@ -87,11 +87,51 @@ def _assert_recovery_artifacts_cleared(store: RunStore, command: str) -> None:
 
 
 def _invalid_previous_quarantined(store: RunStore, command: str) -> bool:
+    return _quarantine_label_present(store, f"{command}-previous-invalid")
+
+
+def _quarantine_label_present(store: RunStore, label: str) -> bool:
     recovery_root = store._path("recovery")
     if not recovery_root.is_dir():
         return False
-    label = f"{command}-previous-invalid"
-    return any((rec_dir / label).exists() for rec_dir in recovery_root.iterdir())
+    return any(
+        (rec_dir / label).exists()
+        for rec_dir in recovery_root.iterdir()
+        if rec_dir.is_dir()
+    )
+
+
+def _assert_destination_absent(store: RunStore, command: str) -> None:
+    destination = output_destination(store, command)
+    if destination.exists() or destination.is_symlink():
+        raise AssertionError(f"destination should be absent: {destination}")
+
+
+_EPUB_WORK_NAME = "epub.work.0123456789abcdef"
+_EPUB_CANDIDATE_NAME = "epub.candidate.0123456789abcdef"
+
+
+def _setup_epub_work(build: Path) -> Path:
+    work = build / _EPUB_WORK_NAME
+    work.mkdir()
+    return work
+
+
+def _write_epub_tree(
+    root: Path,
+    *,
+    committed_page_count: int,
+    primary_bytes: bytes,
+    sha256_override: str | None = None,
+) -> None:
+    _write_manifest(
+        root,
+        command="epub",
+        committed_page_count=committed_page_count,
+        primary="book.epub",
+        primary_bytes=primary_bytes,
+        sha256_override=sha256_override,
+    )
 
 
 def _write_invalid_previous(build: Path, *, command: str = "markdown") -> Path:
@@ -458,3 +498,169 @@ def test_non_regular_transaction_marker_quarantined(
     candidate_path, _ = begin_output_transaction(store, "markdown")
     if not candidate_path.is_dir():
         raise AssertionError("begin_output_transaction failed after marker quarantine")
+
+
+def test_epub_previous_moved_dual_invalid_clears_work_and_artifacts(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    store.write_head(2)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _setup_epub_work(build)
+
+    destination = output_destination(store, "epub")
+    destination.mkdir(parents=True)
+    _write_epub_tree(
+        destination,
+        committed_page_count=1,
+        primary_bytes=b"stale-dest",
+        sha256_override="0" * 64,
+    )
+
+    previous = build / "epub.previous"
+    previous.mkdir()
+    _write_epub_tree(
+        previous,
+        committed_page_count=1,
+        primary_bytes=b"invalid-prev",
+        sha256_override="0" * 64,
+    )
+
+    write_json_atomic(
+        build / "epub.transaction.json",
+        OutputTransaction(
+            output_transaction_format_version=1,
+            command="epub",
+            phase="previous-moved",
+            candidate=_EPUB_CANDIDATE_NAME,
+            previous="epub.previous",
+            work=_EPUB_WORK_NAME,
+        ).model_dump(mode="json"),
+    )
+
+    recover_output_transaction(store, "epub")
+
+    _assert_destination_absent(store, "epub")
+    _assert_recovery_artifacts_cleared(store, "epub")
+    if not _quarantine_label_present(store, "epub-destination-stale"):
+        raise AssertionError("stale destination not quarantined")
+    if not _quarantine_label_present(store, "epub-previous-invalid"):
+        raise AssertionError("invalid previous not quarantined")
+
+
+def test_epub_candidate_valid_aborts_invalid_destination_and_candidate(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    store.write_head(2)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _setup_epub_work(build)
+
+    destination = output_destination(store, "epub")
+    destination.mkdir(parents=True)
+    _write_epub_tree(
+        destination,
+        committed_page_count=1,
+        primary_bytes=b"invalid-dest",
+        sha256_override="0" * 64,
+    )
+
+    candidate = build / _EPUB_CANDIDATE_NAME
+    candidate.mkdir()
+    _write_epub_tree(
+        candidate,
+        committed_page_count=2,
+        primary_bytes=b"invalid-cand",
+        sha256_override="0" * 64,
+    )
+
+    write_json_atomic(
+        build / "epub.transaction.json",
+        OutputTransaction(
+            output_transaction_format_version=1,
+            command="epub",
+            phase="candidate-valid",
+            candidate=_EPUB_CANDIDATE_NAME,
+            previous="epub.previous",
+            work=_EPUB_WORK_NAME,
+        ).model_dump(mode="json"),
+    )
+
+    recover_output_transaction(store, "epub")
+
+    _assert_destination_absent(store, "epub")
+    _assert_recovery_artifacts_cleared(store, "epub")
+    if not _quarantine_label_present(store, "epub-candidate-stale"):
+        raise AssertionError("stale candidate not quarantined")
+    if not _quarantine_label_present(store, "epub-destination-invalid"):
+        raise AssertionError("invalid destination not quarantined")
+
+
+def test_epub_candidate_valid_aborts_invalid_destination_only(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    store.write_head(2)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _setup_epub_work(build)
+
+    destination = output_destination(store, "epub")
+    destination.mkdir(parents=True)
+    _write_epub_tree(
+        destination,
+        committed_page_count=1,
+        primary_bytes=b"invalid-dest",
+        sha256_override="0" * 64,
+    )
+
+    write_json_atomic(
+        build / "epub.transaction.json",
+        OutputTransaction(
+            output_transaction_format_version=1,
+            command="epub",
+            phase="candidate-valid",
+            candidate=_EPUB_CANDIDATE_NAME,
+            previous="epub.previous",
+            work=_EPUB_WORK_NAME,
+        ).model_dump(mode="json"),
+    )
+
+    recover_output_transaction(store, "epub")
+
+    _assert_destination_absent(store, "epub")
+    _assert_recovery_artifacts_cleared(store, "epub")
+    if not _quarantine_label_present(store, "epub-destination-stale"):
+        raise AssertionError("stale destination not quarantined")
+
+
+def test_epub_candidate_valid_aborts_invalid_candidate_only(run_dir: Path) -> None:
+    store = RunStore(run_dir)
+    store.write_head(2)
+    build = store._path(".output-build")
+    build.mkdir(parents=True, exist_ok=True)
+    _setup_epub_work(build)
+
+    candidate = build / _EPUB_CANDIDATE_NAME
+    candidate.mkdir()
+    _write_epub_tree(
+        candidate,
+        committed_page_count=2,
+        primary_bytes=b"invalid-cand",
+        sha256_override="0" * 64,
+    )
+
+    write_json_atomic(
+        build / "epub.transaction.json",
+        OutputTransaction(
+            output_transaction_format_version=1,
+            command="epub",
+            phase="candidate-valid",
+            candidate=_EPUB_CANDIDATE_NAME,
+            previous="epub.previous",
+            work=_EPUB_WORK_NAME,
+        ).model_dump(mode="json"),
+    )
+
+    recover_output_transaction(store, "epub")
+
+    _assert_destination_absent(store, "epub")
+    _assert_recovery_artifacts_cleared(store, "epub")
+    if not _quarantine_label_present(store, "epub-candidate-stale"):
+        raise AssertionError("stale candidate not quarantined")

@@ -491,6 +491,20 @@ def cmd_render_markdown(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stage_publication_assets(
+    root: Path,
+    assets: dict[str, bytes],
+) -> None:
+    assets_root = root / "assets"
+    if assets_root.exists():
+        shutil.rmtree(assets_root)
+
+    for rel_path, content in assets.items():
+        destination = root / rel_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+
+
 def cmd_render_epub(args: argparse.Namespace) -> int:
     run_arg = Path(args.run)
     try:
@@ -530,13 +544,7 @@ def cmd_render_epub(args: argparse.Namespace) -> int:
                     )
                 markdown_path = work_path / "book.md"
                 markdown_path.write_text(markdown, encoding="utf-8")
-                assets_dir = work_path / "assets"
-                if assets_dir.exists():
-                    shutil.rmtree(assets_dir)
-                for rel_path, content in assets.items():
-                    dest = assets_dir / Path(rel_path)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(content)
+                _stage_publication_assets(work_path, assets)
                 epub_path = candidate_path / "book.epub"
                 epub_renderer.render(
                     markdown_path=markdown_path,

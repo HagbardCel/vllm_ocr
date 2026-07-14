@@ -130,3 +130,20 @@ def test_render_copies_assets_from_separate_source_directory(tmp_path: Path) -> 
         )
 
     assert (build_dir / "assets" / asset_name).read_bytes() == asset_bytes
+
+
+def test_stage_publication_assets_uses_canonical_paths(tmp_path: Path) -> None:
+    from bookextract.cli import _stage_publication_assets
+    from bookextract.output_paths import figure_asset_path
+
+    work_path = tmp_path / "epub.work.test"
+    work_path.mkdir()
+    sha256 = "c" * 64
+    png_bytes = b"figure-png"
+    assets = {figure_asset_path(sha256): png_bytes}
+
+    _stage_publication_assets(work_path, assets)
+
+    staged = work_path / figure_asset_path(sha256)
+    assert staged.read_bytes() == png_bytes
+    assert not (work_path / "assets" / "assets").exists()
