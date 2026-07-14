@@ -60,18 +60,20 @@ class ProcessingConfig(DomainModel):
 
 
 class RenderContract(DomainModel):
-    render_contract_format_version: int = 1
+    render_contract_format_version: Literal[1]
     colorspace: Literal["RGB"] = "RGB"
     alpha: Literal[False] = False
     pymupdf_version: str
 
 
 class RunRecord(DomainModel):
-    run_format_version: int = 1
+    run_format_version: Literal[1]
     source: dict[str, object]
     extraction: ExtractionConfig
     fingerprint_policy: InferenceFingerprintConfig
     process_options: ProcessOptions
+    markdown: MarkdownRenderConfig
+    epub: EpubRenderConfig
     render_contract: RenderContract
     prompt_sha256: str
     wire_schema_sha256: str
@@ -79,12 +81,12 @@ class RunRecord(DomainModel):
 
 
 class SourceLocation(DomainModel):
-    source_location_format_version: int = 1
+    source_location_format_version: Literal[1]
     pdf_path: Path
 
 
 class InferenceLocation(DomainModel):
-    inference_location_format_version: int = 1
+    inference_location_format_version: Literal[1]
     model_file_path: Path
     projector_file_path: Path | None = None
 
@@ -113,6 +115,8 @@ def processing_config_from_run_record(record: RunRecord) -> ProcessingConfig:
         extraction=record.extraction,
         fingerprint=record.fingerprint_policy,
         process=record.process_options,
+        markdown=record.markdown,
+        epub=record.epub,
     )
 
 

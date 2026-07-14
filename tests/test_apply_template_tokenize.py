@@ -47,6 +47,7 @@ def _preflight(*, reasoning: bool) -> PreflightResult:
 
 def _thinking_contract() -> ThinkingControlContract:
     return ThinkingControlContract(
+        contract_format_version=1,
         reasoning_format="none",
         applied_template_probe_supported=False,
         model_alias="vision-model",
@@ -413,6 +414,7 @@ def test_frozen_input_tokens_500_raises_probe_unavailable(tmp_path: Path) -> Non
     env = make_inference_environment().model_copy(
         update={
             "token_counting_contract": TextOnlyInputTokensContract(
+                contract_format_version=1,
                 mode="chat-input-tokens-text-only",
                 image_token_policy="configured-reserve",
                 model_alias="vision-model",
@@ -459,6 +461,7 @@ def test_frozen_apply_template_uses_persisted_mode(tmp_path: Path) -> None:
     env = make_inference_environment().model_copy(
         update={
             "token_counting_contract": ApplyTemplateTokenizeContract(
+                contract_format_version=1,
                 mode="apply-template-tokenize",
                 apply_template_request_mode="messages-plus-chat-template-kwargs",
                 input_projection="text-only",

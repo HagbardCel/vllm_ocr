@@ -280,6 +280,7 @@ class LlamaCppVisionClient:
                 if image_count > text_count:
                     mode = "chat-input-tokens-multimodal"
                     contract: TokenCountingContract = MultimodalInputTokensContract(
+                        contract_format_version=1,
                         mode=mode,
                         model_alias=identity.model_alias,
                         llama_cpp_build=identity.llama_cpp_build,
@@ -288,6 +289,7 @@ class LlamaCppVisionClient:
                 else:
                     mode = "chat-input-tokens-text-only"
                     contract = TextOnlyInputTokensContract(
+                        contract_format_version=1,
                         mode=mode,
                         image_token_policy="configured-reserve",
                         model_alias=identity.model_alias,
@@ -303,6 +305,7 @@ class LlamaCppVisionClient:
             return self._build_apply_template_contract(preflight)
 
         return EstimateOnlyContract(
+            estimation_version=1,
             mode="estimate-only",
             model_alias=identity.model_alias,
             llama_cpp_build=identity.llama_cpp_build,
@@ -316,6 +319,7 @@ class LlamaCppVisionClient:
 
         for reasoning_format in _THINKING_FORMAT_CANDIDATES:
             contract = ThinkingControlContract(
+                contract_format_version=1,
                 reasoning_format=reasoning_format,
                 applied_template_probe_supported=applied_template_supported,
                 model_alias=identity.model_alias,
@@ -1300,6 +1304,7 @@ class LlamaCppVisionClient:
         else:
             request_mode = "messages-only"
         return ApplyTemplateTokenizeContract(
+            contract_format_version=1,
             mode="apply-template-tokenize",
             apply_template_request_mode=request_mode,
             input_projection="text-only",

@@ -96,6 +96,8 @@ def test_partial_run_does_not_validate_complete_book(
     processing_config: ProcessingConfig,
 ) -> None:
     from bookextract.config import (
+        EpubRenderConfig,
+        MarkdownRenderConfig,
         ProcessOptions,
         RenderContract,
         RunRecord,
@@ -110,11 +112,17 @@ def test_partial_run_does_not_validate_complete_book(
     write_json_atomic(
         run_dir / "run.json",
         RunRecord(
+            run_format_version=1,
             source={"sha256": "0" * 64, "size": 1, "page_count": 3},
             extraction=processing_config.extraction,
             fingerprint_policy={"require_complete_fingerprint": False},
             process_options=ProcessOptions(),
-            render_contract=RenderContract(pymupdf_version="test"),
+            markdown=MarkdownRenderConfig(),
+            epub=EpubRenderConfig(),
+            render_contract=RenderContract(
+                render_contract_format_version=1,
+                pymupdf_version="test",
+            ),
             prompt_sha256="0" * 64,
             wire_schema_sha256="0" * 64,
             created_at="2026-01-01T00:00:00Z",
@@ -122,7 +130,9 @@ def test_partial_run_does_not_validate_complete_book(
     )
     write_json_atomic(
         run_dir / "source-location.json",
-        SourceLocation(pdf_path=multi_page_pdf).model_dump(mode="json"),
+        SourceLocation(source_location_format_version=1, pdf_path=multi_page_pdf).model_dump(
+            mode="json"
+        ),
     )
 
     source = PdfPageSource(multi_page_pdf, run_dir / "pages", dpi=72)

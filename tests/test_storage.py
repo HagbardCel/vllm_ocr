@@ -32,7 +32,7 @@ def test_validate_commit_round_trip(tmp_path: Path) -> None:
     rel = "page-assessment.json"
     (commit_dir / rel).write_bytes(content)
     digest = hashlib.sha256(content).hexdigest()
-    manifest = CommitManifest(page_index=0, files={rel: digest})
+    manifest = CommitManifest(manifest_format_version=1, page_index=0, files={rel: digest})
     (commit_dir / "manifest.json").write_text(
         manifest.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
@@ -47,7 +47,7 @@ def test_validate_commit_detects_hash_mismatch(tmp_path: Path) -> None:
     commit_dir.mkdir()
     rel = "data.bin"
     (commit_dir / rel).write_bytes(b"actual")
-    manifest = CommitManifest(page_index=0, files={rel: "0" * 64})
+    manifest = CommitManifest(manifest_format_version=1, page_index=0, files={rel: "0" * 64})
     (commit_dir / "manifest.json").write_text(
         manifest.model_dump_json(indent=2) + "\n",
         encoding="utf-8",

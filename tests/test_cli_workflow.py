@@ -12,8 +12,10 @@ import pytest
 from bookextract.canonical import sha256_hex
 from bookextract.cli import main
 from bookextract.config import (
+    EpubRenderConfig,
     ExtractionConfig,
     InferenceLocation,
+    MarkdownRenderConfig,
     ProcessingConfig,
     ProcessOptions,
     RenderContract,
@@ -658,11 +660,17 @@ def test_bootstrap_later_environment_never_calls_render(tmp_path: Path) -> None:
     write_json_atomic(
         tmp_path / "run" / "run.json",
         RunRecord(
+            run_format_version=1,
             source={"sha256": "0" * 64, "size": 1},
             extraction=ExtractionConfig(model_alias="vision-model", prompt_version="v1"),
             fingerprint_policy={"require_complete_fingerprint": False},
             process_options=ProcessOptions(),
-            render_contract=RenderContract(pymupdf_version="1"),
+            markdown=MarkdownRenderConfig(),
+            epub=EpubRenderConfig(),
+            render_contract=RenderContract(
+                render_contract_format_version=1,
+                pymupdf_version="1",
+            ),
             prompt_sha256="0" * 64,
             wire_schema_sha256="0" * 64,
             created_at="2026-01-01T00:00:00Z",
@@ -672,7 +680,10 @@ def test_bootstrap_later_environment_never_calls_render(tmp_path: Path) -> None:
     model.write_bytes(b"model")
     write_json_atomic(
         tmp_path / "run" / "inference-location.json",
-        InferenceLocation(model_file_path=model).model_dump(mode="json"),
+        InferenceLocation(
+            inference_location_format_version=1,
+            model_file_path=model,
+        ).model_dump(mode="json"),
     )
     base_env = make_inference_environment()
     store.write_inference_environment(

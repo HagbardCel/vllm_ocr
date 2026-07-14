@@ -314,36 +314,63 @@ class BookDocument(DomainModel):
 
 
 class HeadState(DomainModel):
-    head_format_version: int = 1
+    head_format_version: Literal[1]
     committed_page_count: int = 0
 
 
 class StateCache(DomainModel):
-    state_cache_version: int = 1
+    state_cache_version: Literal[1]
     committed_page_count: int = 0
     state: BookState
 
 
 class CommitManifest(DomainModel):
-    manifest_format_version: int = 1
+    manifest_format_version: Literal[1]
     page_index: int
     files: dict[str, str]
 
 
 class SourceMapEntry(DomainModel):
     publication_block_index: int
-    page_index: int
-    block_id: str | None = None
+    source_pages: list[int]
+    source_block_ids: list[str]
+
+
+class OutputFileEntry(DomainModel):
+    path: str
+    sha256: str
+    size_bytes: int
 
 
 class OutputManifest(DomainModel):
-    output_manifest_format_version: int = 1
+    output_manifest_format_version: Literal[2]
+    command: Literal["markdown", "epub"]
+    committed_page_count: int
     publication_identifier: str
     publication_fingerprint: str
     source_map: list[SourceMapEntry]
+    files: list[OutputFileEntry]
+
+
+OutputTransactionPhase = Literal[
+    "building",
+    "candidate-valid",
+    "previous-moved",
+    "candidate-published",
+]
+
+
+class OutputTransaction(DomainModel):
+    output_transaction_format_version: Literal[1]
+    command: Literal["markdown", "epub"]
+    phase: OutputTransactionPhase
+    candidate: str
+    previous: str
+    work: str | None = None
 
 
 class MultimodalInputTokensContract(DomainModel):
+    contract_format_version: Literal[1]
     mode: Literal["chat-input-tokens-multimodal"]
     model_alias: str
     llama_cpp_build: str
@@ -351,6 +378,7 @@ class MultimodalInputTokensContract(DomainModel):
 
 
 class TextOnlyInputTokensContract(DomainModel):
+    contract_format_version: Literal[1]
     mode: Literal["chat-input-tokens-text-only"]
     image_token_policy: Literal["configured-reserve"]
     model_alias: str
@@ -359,6 +387,7 @@ class TextOnlyInputTokensContract(DomainModel):
 
 
 class ApplyTemplateTokenizeContract(DomainModel):
+    contract_format_version: Literal[1]
     mode: Literal["apply-template-tokenize"]
     apply_template_request_mode: Literal[
         "messages-only",
@@ -374,8 +403,8 @@ class ApplyTemplateTokenizeContract(DomainModel):
 
 
 class EstimateOnlyContract(DomainModel):
+    estimation_version: Literal[1]
     mode: Literal["estimate-only"]
-    estimation_version: int = 1
     model_alias: str
     llama_cpp_build: str
     chat_template_sha256: str
@@ -398,7 +427,7 @@ TokenCountingContract = Annotated[
 
 
 class ThinkingControlContract(DomainModel):
-    contract_format_version: int = 1
+    contract_format_version: Literal[1]
     enable_thinking: Literal[False] = False
     reasoning_format: Literal["none", "deepseek", "deepseek-legacy"]
     applied_template_probe_supported: bool
@@ -450,7 +479,7 @@ class ServerInvocationCapabilities(DomainModel):
 
 
 class InferenceEnvironment(DomainModel):
-    inference_environment_format_version: int = 1
+    inference_environment_format_version: Literal[1]
     server: ServerInferenceIdentity
     model_file: FileFingerprint | None = None
     projector_file: FileFingerprint | None = None

@@ -36,6 +36,7 @@ def _client_with_handler(handler: Any) -> LlamaCppVisionClient:
     env = make_inference_environment().model_copy(
         update={
             "token_counting_contract": EstimateOnlyContract(
+                estimation_version=1,
                 mode="estimate-only",
                 model_alias="vision-model",
                 llama_cpp_build="test-build",

@@ -116,6 +116,7 @@ def test_smoke_contradiction_becomes_drift() -> None:
         client=httpx.Client(base_url="http://test", transport=httpx.MockTransport(handler)),
     )
     contract = ThinkingControlContract(
+        contract_format_version=1,
         reasoning_format="none",
         applied_template_probe_supported=False,
         model_alias="vision-model",

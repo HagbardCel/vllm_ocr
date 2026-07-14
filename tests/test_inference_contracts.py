@@ -17,6 +17,7 @@ from tests.conftest import make_inference_environment
 
 def test_token_counting_contract_discriminator() -> None:
     contract = MultimodalInputTokensContract(
+        contract_format_version=1,
         mode="chat-input-tokens-multimodal",
         model_alias="m",
         llama_cpp_build="b",

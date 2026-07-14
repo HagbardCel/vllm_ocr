@@ -7,7 +7,13 @@ from pathlib import Path
 import fitz
 import pytest
 
-from bookextract.config import ExtractionConfig, ProcessingConfig, ProcessOptions
+from bookextract.config import (
+    EpubRenderConfig,
+    ExtractionConfig,
+    MarkdownRenderConfig,
+    ProcessingConfig,
+    ProcessOptions,
+)
 from bookextract.models import (
     ApplyTemplateTokenizeContract,
     InferenceEnvironment,
@@ -54,6 +60,7 @@ def make_assessment(
 
 def make_inference_environment() -> InferenceEnvironment:
     return InferenceEnvironment(
+        inference_environment_format_version=1,
         server=ServerInferenceIdentity(
             llama_cpp_build="test-build",
             model_alias="test-model",
@@ -65,6 +72,7 @@ def make_inference_environment() -> InferenceEnvironment:
         model_binding_verified=True,
         projector_binding="operator-asserted",
         token_counting_contract=ApplyTemplateTokenizeContract(
+            contract_format_version=1,
             mode="apply-template-tokenize",
             apply_template_request_mode="messages-only",
             input_projection="text-only",
@@ -74,6 +82,7 @@ def make_inference_environment() -> InferenceEnvironment:
             chat_template_sha256="c" * 64,
         ),
         thinking_control_contract=ThinkingControlContract(
+            contract_format_version=1,
             reasoning_format="none",
             applied_template_probe_supported=False,
             model_alias="test-model",
@@ -120,11 +129,17 @@ def run_dir(tmp_path: Path, minimal_pdf: Path) -> Path:
     write_json_atomic(
         run / "run.json",
         RunRecord(
+            run_format_version=1,
             source={"sha256": "0" * 64, "size": 1},
             extraction=ExtractionConfig(model_alias="test-model", prompt_version="v1"),
             fingerprint_policy={"require_complete_fingerprint": False},
             process_options=ProcessOptions(),
-            render_contract=RenderContract(pymupdf_version=fitz.VersionBind),
+            markdown=MarkdownRenderConfig(),
+            epub=EpubRenderConfig(),
+            render_contract=RenderContract(
+                render_contract_format_version=1,
+                pymupdf_version=fitz.VersionBind,
+            ),
             prompt_sha256="0" * 64,
             wire_schema_sha256="0" * 64,
             created_at="2026-01-01T00:00:00Z",
@@ -132,6 +147,8 @@ def run_dir(tmp_path: Path, minimal_pdf: Path) -> Path:
     )
     write_json_atomic(
         run / "source-location.json",
-        SourceLocation(pdf_path=minimal_pdf).model_dump(mode="json"),
+        SourceLocation(source_location_format_version=1, pdf_path=minimal_pdf).model_dump(
+            mode="json"
+        ),
     )
     return run

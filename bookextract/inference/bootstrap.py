@@ -141,6 +141,7 @@ def prepare_inference_environment(
             thinking_contract=thinking_contract,
         )
         environment = InferenceEnvironment(
+            inference_environment_format_version=1,
             server=preflight.identity,
             model_file=model_file,
             projector_file=projector_file,
